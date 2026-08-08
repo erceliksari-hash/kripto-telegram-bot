@@ -10,7 +10,7 @@ st.set_page_config(page_title="Crypto Scanner & Telegram Bot", layout="wide")
 # --- SECRETS & SIDEBAR ---
 st.sidebar.header("⚙️ Bot & Filtre Ayarları")
 
-# Streamlit Secrets'tan oku, yoksa input alanından al
+# Streamlit Secrets'tan oku, yoksa boş string al
 default_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
 default_chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
@@ -46,58 +46,54 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- GELİŞTİRİLMİŞ PİYASA VERİSİ ÇEKME FONKSİYONU ---
+# --- KESİNTİSİZ PİYASA VERİSİ ÇEKME FONKSİYONU (BYBIT V5 API) ---
 @st.cache_data(ttl=15)
 def fetch_market_data():
-    # Binance engeline takılmamak için alternatif endpoint'ler
-    urls = [
-        "https://fapi.binance.com/fapi/v1/ticker/24hr",
-        "https://api.binance.com/api/v3/ticker/24hr",  # Spot yedek
-    ]
-
+    # Bybit Futures API - AWS/Streamlit Cloud IP kısıtlamasına takılmaz
+    url = "https://api.bybit.com/v5/market/tickers?category=linear"
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
     }
 
-    data = None
-    for url in urls:
-        try:
-            res = requests.get(url, headers=headers, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                break
-        except Exception as e:
-            print(f"URL bağlantı hatası ({url}): {e}")
-            continue
-
-    if not data:
-        return pd.DataFrame()
-
     try:
-        df = pd.DataFrame(data)
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            result = res.json().get("result", {}).get("list", [])
+            if not result:
+                return pd.DataFrame()
 
-        # Sadece USDT çiftlerini filtrele
-        df = df[df["symbol"].str.endswith("USDT")].copy()
+            df = pd.DataFrame(result)
 
-        # Güvenli Sayısal Dönüştürme
-        df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
-        df["priceChangePercent"] = pd.to_numeric(
-            df["priceChangePercent"], errors="coerce"
-        )
+            # Sadece USDT çiftlerini filtrele
+            df = df[df["symbol"].str.endswith("USDT")].copy()
 
-        # Hacim sütunu (Spot ve Futures API farkı için kontrol)
-        vol_col = "quoteVolume" if "quoteVolume" in df.columns else "volume"
-        df["quoteVolume"] = (
-            pd.to_numeric(df[vol_col], errors="coerce") / 1_000_000
-        )
+            # Sayısal veri dönüşümleri ve oranlamalar
+            df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
 
-        df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
-        return df
+            # Bybit 24h yüzde değişimi ondalık verir (örn: 0.05 = %5)
+            df["priceChangePercent"] = (
+                pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
+            )
+
+            # turnover24h = 24 Saatlik Toplam Hacim (USD cinsinden) -> Milyon $'a çevrilir
+            df["quoteVolume"] = (
+                pd.to_numeric(df["turnover24h"], errors="coerce") / 1_000_000
+            )
+
+            # Eksik / Hatalı verileri temizle
+            df = df.dropna(
+                subset=["lastPrice", "priceChangePercent", "quoteVolume"]
+            )
+
+            return df[
+                ["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]
+            ]
     except Exception as e:
-        print(f"Veri işleme hatası: {e}")
-        return pd.DataFrame()
+        print(f"Piyasa verisi çekme hatası: {e}")
+
+    return pd.DataFrame()
 
 
 # --- ANA EKRAN (DASHBOARD) ---
@@ -139,14 +135,14 @@ if not df.empty:
     )
 else:
     st.error(
-        "❌ Piyasa verileri çekilemedi! Binance API bağlantısı zaman aşımına uğradı veya Streamlit IP kısıtlamasına takıldı."
+        "❌ Piyasa verileri çekilemedi! Bağlantı zaman aşımına uğramış olabilir."
     )
     st.info(
-        "💡 Çözüm: Sayfadaki 'Verileri Şimdi Yenile' butonuna basabilir veya birkaç dakika bekleyebilirsiniz."
+        "💡 Çözüm: Sayfadaki 'Verileri Şimdi Yenile' butonuna basabilir veya birkaç saniye bekleyebilirsiniz."
     )
 
 
-# --- ARKA PLAN WORKER (THREAD) ---
+# --- ARKA PLAN WORKER (THREAD - TELEGRAM GÖNDERİCİSİ) ---
 def telegram_worker():
     sent_signals = set()
     while True:
@@ -164,7 +160,7 @@ def telegram_worker():
                         msg = (
                             f"🚨 **TRADING FIRSATI (Streamlit)**\n\n"
                             f"🪙 **Varlık:** #{symbol}\n"
-                            f"💵 **Fiyat:** ${row['lastPrice']}\n"
+                            f"💵 **Fiyat:** ${row['lastPrice']:.4f}\n"
                             f"📊 **24h Değişim:** %{row['priceChangePercent']:.2f}\n"
                             f"💰 **24h Hacim:** ${row['quoteVolume']:.1f}M USDT\n"
                         )
@@ -176,6 +172,7 @@ def telegram_worker():
         time.sleep(scan_interval)
 
 
+# Background thread'i tek bir sefer başlatma kontrolü
 if "thread_started" not in st.session_state:
     t = Thread(target=telegram_worker, daemon=True)
     t.start()
