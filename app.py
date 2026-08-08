@@ -10,7 +10,6 @@ st.set_page_config(page_title="Crypto Scanner & Telegram Bot", layout="wide")
 # --- SECRETS & SIDEBAR ---
 st.sidebar.header("⚙️ Bot & Filtre Ayarları")
 
-# Streamlit Secrets'tan oku, yoksa boş string al
 default_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
 default_chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
 
@@ -46,10 +45,9 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- KESİNTİSİZ PİYASA VERİSİ ÇEKME FONKSİYONU (BYBIT V5 API) ---
-@st.cache_data(ttl=15)
+# --- PİYASA VERİSİ ÇEKME FONKSİYONU (BYBIT + DETAYLI HATA TESPİTİ) ---
+@st.cache_data(ttl=10)
 def fetch_market_data():
-    # Bybit Futures API - AWS/Streamlit Cloud IP kısıtlamasına takılmaz
     url = "https://api.bybit.com/v5/market/tickers?category=linear"
     headers = {
         "User-Agent": (
@@ -60,50 +58,56 @@ def fetch_market_data():
     try:
         res = requests.get(url, headers=headers, timeout=10)
         if res.status_code == 200:
-            result = res.json().get("result", {}).get("list", [])
+            data = res.json()
+            result = data.get("result", {}).get("list", [])
             if not result:
-                return pd.DataFrame()
+                return pd.DataFrame(), "API yanıt verdi ancak liste boş."
 
             df = pd.DataFrame(result)
 
-            # Sadece USDT çiftlerini filtrele
+            # Sadece USDT çiftlerini al
             df = df[df["symbol"].str.endswith("USDT")].copy()
 
-            # Sayısal veri dönüşümleri ve oranlamalar
             df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
-
-            # Bybit 24h yüzde değişimi ondalık verir (örn: 0.05 = %5)
             df["priceChangePercent"] = (
                 pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
             )
-
-            # turnover24h = 24 Saatlik Toplam Hacim (USD cinsinden) -> Milyon $'a çevrilir
             df["quoteVolume"] = (
                 pd.to_numeric(df["turnover24h"], errors="coerce") / 1_000_000
             )
 
-            # Eksik / Hatalı verileri temizle
             df = df.dropna(
                 subset=["lastPrice", "priceChangePercent", "quoteVolume"]
             )
-
-            return df[
-                ["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]
-            ]
+            return (
+                df[
+                    [
+                        "symbol",
+                        "lastPrice",
+                        "priceChangePercent",
+                        "quoteVolume",
+                    ]
+                ],
+                None,
+            )
+        else:
+            return (
+                pd.DataFrame(),
+                f"HTTP Hatası: {res.status_code} - {res.text}",
+            )
     except Exception as e:
-        print(f"Piyasa verisi çekme hatası: {e}")
-
-    return pd.DataFrame()
+        return pd.DataFrame(), f"Bağlantı İstisna Hatası: {str(e)}"
 
 
 # --- ANA EKRAN (DASHBOARD) ---
 st.title("📊 Kripto Piyasası Taraması & Sinyal Paneli")
 
-# Sayfayı Manuel Yenileme Butonu
-if st.button("🔄 Verileri Şimdi Yenile"):
-    st.cache_data.clear()
+col_btn1, col_btn2 = st.columns([1, 4])
+with col_btn1:
+    if st.button("🔄 Verileri Şimdi Yenile"):
+        st.cache_data.clear()
 
-df = fetch_market_data()
+df, error_msg = fetch_market_data()
 
 if not df.empty:
     filtered_df = df[
@@ -134,20 +138,15 @@ if not df.empty:
         use_container_width=True,
     )
 else:
-    st.error(
-        "❌ Piyasa verileri çekilemedi! Bağlantı zaman aşımına uğramış olabilir."
-    )
-    st.info(
-        "💡 Çözüm: Sayfadaki 'Verileri Şimdi Yenile' butonuna basabilir veya birkaç saniye bekleyebilirsiniz."
-    )
+    st.error(f"❌ Veri Çekilemedi! Detay: {error_msg}")
 
 
-# --- ARKA PLAN WORKER (THREAD - TELEGRAM GÖNDERİCİSİ) ---
+# --- ARKA PLAN WORKER ---
 def telegram_worker():
     sent_signals = set()
     while True:
         if bot_active and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            data = fetch_market_data()
+            data, _ = fetch_market_data()
             if not data.empty:
                 matches = data[
                     (data["quoteVolume"] >= min_volume_m)
@@ -172,7 +171,6 @@ def telegram_worker():
         time.sleep(scan_interval)
 
 
-# Background thread'i tek bir sefer başlatma kontrolü
 if "thread_started" not in st.session_state:
     t = Thread(target=telegram_worker, daemon=True)
     t.start()
