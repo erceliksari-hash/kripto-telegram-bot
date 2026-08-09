@@ -21,16 +21,16 @@ def get_secret(section, key, default=""):
 DEFAULT_TOKEN = get_secret("telegram", "bot_token", "8736398780:AAFWxPurStPIts--TYjHZccPpjVNnIk02Sg")
 DEFAULT_CHAT_ID = get_secret("telegram", "chat_id", "-1004436877206")
 
-# Thread'ler arası güvenli veri paylaşımı
+# Thread'ler arası güvenli veri paylaşımı (Optimizasyonlar eklendi)
 GLOBAL_CONFIG = {
     "active": False,
     "token": DEFAULT_TOKEN,
     "chat_id": DEFAULT_CHAT_ID,
     "min_volume": 10.0,
     "min_change": 2.0,
-    "rsi_min": 0,
-    "rsi_max": 100,
-    "use_ema_filter": False,
+    "rsi_min": 40,            # Optimal Momentum Giriş Sınırı
+    "rsi_max": 62,            # Tepede Şişmeyi Önleme Sınırı
+    "use_ema_filter": True,   # Yükselen Trend Zorunlu
     "interval": 60,
 }
 config_lock = Lock()
@@ -73,10 +73,11 @@ min_volume_m = st.sidebar.number_input("Minimum 24h Hacim (Milyon $)", value=10.
 min_change_pct = st.sidebar.number_input("Minimum Değişim (%)", value=2.0, step=0.5)
 
 st.sidebar.markdown("---")
-st.sidebar.header("📈 Teknik Gösterge Filtreleri")
+st.sidebar.header("📈 Optimal Teknik Filtreler")
 
-rsi_range = st.sidebar.slider("RSI (14) Aralığı", 0, 100, (30, 70))
-use_ema_filter = st.sidebar.checkbox("Sadece Yükselen Trenddekileri Göster (EMA20 > EMA50)")
+# Varsayılan strateji değerleri: RSI 40-62 ve EMA Trend Aktif
+rsi_range = st.sidebar.slider("RSI (14) Aralığı (Önerilen: 40-62)", 0, 100, (40, 62))
+use_ema_filter = st.sidebar.checkbox("Sadece Yükselen Trenddekileri Göster (EMA20 > EMA50)", value=True)
 
 with config_lock:
     GLOBAL_CONFIG["active"] = bot_active
@@ -106,22 +107,30 @@ def send_telegram_signal(token, chat_id, row):
     tp1 = row.get('tp1_price', 0)
     tp2 = row.get('tp2_price', 0)
     
-    direction_emoji = "🟢" if change >= 0 else "🔴"
-    
+    # Akıllı Momentum Notu
+    if rsi < 45:
+        rsi_note = "🟢 Dip Katlama Potansiyeli"
+    elif rsi <= 58:
+        rsi_note = "🚀 Güçlü Momentum Kırılımı"
+    else:
+        rsi_note = "⚠️ Dirence Yakın / Dikkat"
+        
     message = (
-        f"🚨 *KRİPTO SİNYAL ALARMI* 🚨\n"
+        f"🚨 *YÜKSEK OLASILIKLI KRİPTO SİNYALİ* 🚨\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *Sembol:* #{symbol}\n"
         f"💵 *Giriş (Entry):* `${price:.4f}`\n"
-        f"{direction_emoji} *24h Değişim:* `%{change:+.2f}`\n"
+        f"📈 *24h Değişim:* `%{change:+.2f}`\n"
         f"💰 *24h Hacim:* `${volume:.2f}M`\n"
-        f"📊 *RSI (14):* `{rsi:.1f}` | *Trend:* `{ema_status}`\n"
+        f"📊 *RSI (14):* `{rsi:.1f}` ({rsi_note})\n"
+        f"📐 *Trend Durumu:* `{ema_status}`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🎯 *RİSK & HEDEF SEVİYELERİ (ATR)*\n"
         f"🛑 *Stop-Loss (SL):* `${sl:.4f}` (`-%{((price-sl)/price)*100:.2f}`)\n"
         f"🎯 *Hedef 1 (TP1 - 1:1.5):* `${tp1:.4f}` (`+%{((tp1-price)/price)*100:.2f}`)\n"
         f"🚀 *Hedef 2 (TP2 - 1:2.0):* `${tp2:.4f}` (`+%{((tp2-price)/price)*100:.2f}`)\n"
         f"━━━━━━━━━━━━━━━━━━\n"
+        f"💡 *İşlem Öncesi:* Lütfen aşağıdaki butonla grafiği açıp **üst majör direnci** kontrol ediniz.\n"
         f"⏰ *Zaman:* `{time.strftime('%H:%M:%S')}`\n"
     )
     
@@ -132,7 +141,7 @@ def send_telegram_signal(token, chat_id, row):
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "📈 TradingView Grafiği", "url": tradingview_url},
+                {"text": "📈 TradingView Grafiği (Direnç Kontrolü)", "url": tradingview_url},
                 {"text": "🔗 OKX'te İncele", "url": okx_url}
             ]
         ]
@@ -178,7 +187,6 @@ def fetch_kline_indicators(inst_id, current_price):
                 ema_status = "EMA20 > EMA50 (Boğa)" if latest_ema20 > latest_ema50 else "EMA20 < EMA50 (Ayı)"
                 is_bullish = latest_ema20 > latest_ema50
                 
-                # ATR Seviye Hesaplamaları
                 sl_price = max(0.0001, current_price - (1.5 * atr_val))
                 risk_amount = current_price - sl_price
                 tp1_price = current_price + (1.5 * risk_amount)
@@ -195,7 +203,6 @@ def fetch_kline_indicators(inst_id, current_price):
     except Exception:
         pass
     
-    # Hata durumunda varsayılan değerler
     sl = current_price * 0.97
     tp1 = current_price * 1.045
     tp2 = current_price * 1.06
@@ -261,9 +268,10 @@ if err_msg:
     st.error(f"❌ Veri Çekme Hatası: {err_msg}")
 
 if not df_raw.empty:
+    # Sadece pozitif değişim gösteren (yükselen) coinleri tara
     base_filtered = df_raw[
         (df_raw["quoteVolume"] >= min_volume_m) &
-        (df_raw["priceChangePercent"].abs() >= min_change_pct)
+        (df_raw["priceChangePercent"] >= min_change_pct)
     ].copy()
 
     rsi_list = []
@@ -335,7 +343,7 @@ def telegram_worker():
             if not data.empty:
                 matches = data[
                     (data["quoteVolume"] >= cfg["min_volume"]) &
-                    (data["priceChangePercent"].abs() >= cfg["min_change"])
+                    (data["priceChangePercent"] >= cfg["min_change"])
                 ].copy()
 
                 current_time = time.time()
