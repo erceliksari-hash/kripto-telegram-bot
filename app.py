@@ -76,10 +76,10 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- KESİNTİSİZ VERİ ÇEKME (BINANCE FUTURES) ---
-def _raw_fetch_binance_data():
-    # Binance Futures (USDT-M) Ticker Endpoint
-    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+# --- KESİNTİSİZ VERİ ÇEKME (OKX FUTURES API) ---
+def _raw_fetch_okx_data():
+    # OKX Public Tickers Endpoint (USDT SWAP / Vadeli)
+    url = "https://www.okx.com/api/v5/market/tickers?instType=SWAP"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -88,29 +88,51 @@ def _raw_fetch_binance_data():
     try:
         r = requests.get(url, headers=headers, timeout=10)
         if r.status_code == 200:
-            data = r.json()
-            df = pd.DataFrame(data)
-            
-            # Sadece USDT çiftlerini al
-            df = df[df["symbol"].str.endswith("USDT")].copy()
+            res = r.json()
+            if res.get("code") != "0":
+                return pd.DataFrame(), f"OKX API Yanıt Hatası: {res.get('msg')}"
 
-            # Sayısal sütun dönüşümleri
-            df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
-            df["priceChangePercent"] = pd.to_numeric(df["priceChangePercent"], errors="coerce")
-            df["quoteVolume"] = pd.to_numeric(df["quoteVolume"], errors="coerce") / 1_000_000
+            raw_list = res.get("data", [])
+            parsed_data = []
 
-            df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
-            return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]], None
+            for item in raw_list:
+                inst_id = item.get("instId", "")
+                if inst_id.endswith("-USDT-SWAP"):
+                    symbol = inst_id.replace("-USDT-SWAP", "USDT")
+                    last_price = float(item.get("last", 0))
+                    sod_utc0 = float(item.get("sodUtc0", last_price)) # Gün başı fiyatı
+                    
+                    if sod_utc0 > 0:
+                        change_pct = ((last_price - sod_utc0) / sod_utc0) * 100
+                    else:
+                        change_pct = 0.0
+                    
+                    # 24h USDT Hacmi
+                    quote_vol = float(item.get("volCcy24h", 0)) / 1_000_000
+
+                    parsed_data.append({
+                        "symbol": symbol,
+                        "lastPrice": last_price,
+                        "priceChangePercent": change_pct,
+                        "quoteVolume": quote_vol
+                    })
+
+            if parsed_data:
+                df = pd.DataFrame(parsed_data)
+                df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
+                return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]], None
+            else:
+                return pd.DataFrame(), "OKX verisi boş döndü."
         else:
-            return pd.DataFrame(), f"Binance HTTP Hatası: Kod {r.status_code}"
+            return pd.DataFrame(), f"OKX HTTP Hatası: Kod {r.status_code}"
     except Exception as e:
-        return pd.DataFrame(), f"Binance Bağlantı Hatası: {str(e)}"
+        return pd.DataFrame(), f"OKX Bağlantı Hatası: {str(e)}"
 
 
 # Streamlit önbellekleme
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_market_data_cached():
-    return _raw_fetch_binance_data()
+    return _raw_fetch_okx_data()
 
 
 # --- DASHBOARD ---
@@ -171,7 +193,7 @@ def telegram_worker():
             cfg = GLOBAL_CONFIG.copy()
 
         if cfg["active"] and cfg["token"] and cfg["chat_id"]:
-            data, _ = _raw_fetch_binance_data()
+            data, _ = _raw_fetch_okx_data()
 
             if not data.empty:
                 matches = data[
