@@ -1,5 +1,4 @@
 import time
-import re
 from threading import Thread, Lock
 from datetime import datetime, timezone
 
@@ -22,20 +21,18 @@ st.set_page_config(
 # ───────────────────────────────────────────────
 def escape_telegram_markdown(text: str) -> str:
     """
-    Telegram 'Markdown' parse_mode için özel karakterleri escape eder.
-    Eski Markdown modunda _ * [ ] ( ) ~ ` > # + - = | { } . ! karakterleri
-    sorun çıkarabilir. Güvenli olmak için hepsini escape ediyoruz.
+    Telegram 'Markdown' parse_mode icin ozel karakterleri escape eder.
     """
     escape_chars = r"\_*[]()~`>#+-=|{}.!"
     for ch in escape_chars:
-        text = text.replace(ch, f"\\{ch}")
+        text = text.replace(ch, "\\" + ch)
     return text
 
 
-def fetch_bybit_tickers() -> tuple[pd.DataFrame, str | None]:
+def fetch_bybit_tickers():
     """
-    Bybit V5 API'den USDT perpetual ticker verilerini çeker.
-    Returns: (DataFrame, error_message | None)
+    Bybit V5 API'den USDT perpetual ticker verilerini ceker.
+    Returns: (DataFrame, error_message or None)
     """
     url = "https://api.bybit.com/v5/market/tickers"
     params = {"category": "linear", "limit": 1000}
@@ -52,37 +49,37 @@ def fetch_bybit_tickers() -> tuple[pd.DataFrame, str | None]:
         resp = requests.get(url, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
     except requests.exceptions.Timeout:
-        return pd.DataFrame(), "Bybit API zaman aşımına uğradı. Lütfen tekrar deneyin."
+        return pd.DataFrame(), "Bybit API zaman asimina ugradi. Lutfen tekrar deneyin."
     except requests.exceptions.ConnectionError:
-        return pd.DataFrame(), "Bybit API'ye bağlanılamadı. İnternet bağlantınızı kontrol edin."
+        return pd.DataFrame(), "Bybit API'ye baglanilamadi. Internet baglantinizi kontrol edin."
     except requests.exceptions.HTTPError as e:
-        return pd.DataFrame(), f"Bybit API HTTP Hatası: {e.response.status_code}"
+        return pd.DataFrame(), f"Bybit API HTTP Hatasi: {e.response.status_code}"
     except requests.exceptions.RequestException as e:
-        return pd.DataFrame(), f"İstek Hatası: {str(e)}"
+        return pd.DataFrame(), f"Istek Hatasi: {str(e)}"
 
     try:
         data = resp.json()
     except ValueError:
-        return pd.DataFrame(), "API yanıtı JSON formatında değil."
+        return pd.DataFrame(), "API yaniti JSON formatinda degil."
 
     ret_code = data.get("retCode")
     if ret_code not in (0, None):
         ret_msg = data.get("retMsg", "Bilinmeyen hata")
-        return pd.DataFrame(), f"Bybit API Hatası [{ret_code}]: {ret_msg}"
+        return pd.DataFrame(), f"Bybit API Hatasi [{ret_code}]: {ret_msg}"
 
     ticker_list = data.get("result", {}).get("list", [])
     if not ticker_list:
-        return pd.DataFrame(), "API yanıt verdi fakat liste boş döndü."
+        return pd.DataFrame(), "API yanit verdi fakat liste bos dondu."
 
     df = pd.DataFrame(ticker_list)
 
-    # Sadece USDT çiftleri
+    # Sadece USDT ciftleri
     df = df[df["symbol"].astype(str).str.endswith("USDT")].copy()
 
     if df.empty:
-        return pd.DataFrame(), "USDT çifti bulunamadı."
+        return pd.DataFrame(), "USDT cifti bulunamadi."
 
-    # Sayısal dönüşümler
+    # Sayisal donusumler
     numeric_cols = {
         "lastPrice": "lastPrice",
         "price24hPcnt": "priceChangePercent",
@@ -97,10 +94,10 @@ def fetch_bybit_tickers() -> tuple[pd.DataFrame, str | None]:
 
     df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
 
-    # Yüzde formatına çevir
+    # Yuzde formatina cevir
     df["priceChangePercent"] = df["priceChangePercent"] * 100
 
-    # Hacmi milyon $'a çevir
+    # Hacmi milyon $'a cevir
     df["quoteVolume"] = df["quoteVolume"] / 1_000_000
 
     return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]].copy(), None
@@ -109,8 +106,8 @@ def fetch_bybit_tickers() -> tuple[pd.DataFrame, str | None]:
 # ───────────────────────────────────────────────
 # TELEGRAM
 # ───────────────────────────────────────────────
-def send_telegram_message(token: str, chat_id: str, message: str) -> bool:
-    """Telegram bot üzerinden mesaj gönderir. Başarı durumunu döndürür."""
+def send_telegram_message(token, chat_id, message):
+    """Telegram bot uzerinden mesaj gonderir. Basari durumunu dondurur."""
     if not token or not chat_id:
         return False
 
@@ -135,21 +132,21 @@ def send_telegram_message(token: str, chat_id: str, message: str) -> bool:
 # ───────────────────────────────────────────────
 class TelegramWorker:
     """
-    Arka plan thread\'i olarak çalışan sinyal gönderici.
-    Streamlit session_state üzerinden konfigürasyonu okur.
+    Arka plan thread'i olarak calisan sinyal gonderici.
+    Streamlit session_state uzerinden konfigurasyonu okur.
     """
 
     COOLDOWN_SECONDS = 1800  # 30 dakika
     SENT_SIGNALS_MAX_SIZE = 5000
 
     def __init__(self):
-        self._thread: Thread | None = None
+        self._thread = None
         self._lock = Lock()
-        self._sent_signals: dict[str, float] = {}
+        self._sent_signals = {}
         self._running = False
 
-    def start(self) -> None:
-        """Worker thread\'ini başlatır (idempotent)."""
+    def start(self):
+        """Worker thread'ini baslatir (idempotent)."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -157,8 +154,8 @@ class TelegramWorker:
             self._thread = Thread(target=self._run, daemon=True, name="TelegramWorker")
             self._thread.start()
 
-    def _cleanup_old_signals(self) -> None:
-        """Bellek sızıntısını önlemek için eski sinyalleri temizler."""
+    def _cleanup_old_signals(self):
+        """Bellek sizintisini onlemek icin eski sinyalleri temizler."""
         now = time.time()
         cutoff = now - self.COOLDOWN_SECONDS
         expired = [sym for sym, ts in self._sent_signals.items() if ts < cutoff]
@@ -172,10 +169,10 @@ class TelegramWorker:
             for sym, _ in sorted_items[:to_remove]:
                 del self._sent_signals[sym]
 
-    def _run(self) -> None:
-        """Ana döngü."""
+    def _run(self):
+        """Ana dongu."""
         while True:
-            # Streamlit session_state\'den config oku
+            # Streamlit session_state'den config oku
             cfg = st.session_state.get("bot_config", {})
             active = cfg.get("active", False)
             token = cfg.get("token", "")
@@ -210,15 +207,19 @@ class TelegramWorker:
                     continue
 
                 safe_sym = escape_telegram_markdown(sym)
-                direction = "🟢 YUKARI" if row["priceChangePercent"] >= 0 else "🔴 AŞAĞI"
+                direction = "🟢 YUKARI" if row["priceChangePercent"] >= 0 else "🔴 ASAGI"
+                price = float(row["lastPrice"])
+                change = float(row["priceChangePercent"])
+                volume = float(row["quoteVolume"])
+                time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
                 msg = (
-                    f"🚨 *KRİPTO SİNYALİ* {direction}\n\n"
-                    f"🪙 *Sembol:* `#{safe_sym}`\n"
-                    f"💵 *Fiyat:* `${row[\'lastPrice\']:.4f}`\n"
-                    f"📊 *Değişim:* `%{row[\'priceChangePercent\']:.2f}`\n"
-                    f"💰 *Hacim:* `${row[\'quoteVolume\']:.1f}M`\n"
-                    f"⏰ *Zaman:* `{datetime.now(timezone.utc).strftime(\'%H:%M UTC\')}`"
+                    "🚨 *KRIPTO SINYALI* " + direction + "\n\n"
+                    "🪙 *Sembol:* `#" + safe_sym + "`\n"
+                    "💵 *Fiyat:* `$" + f"{price:.4f}" + "`\n"
+                    "📊 *Degisim:* `%" + f"{change:.2f}" + "`\n"
+                    "💰 *Hacim:* `$" + f"{volume:.1f}M" + "`\n"
+                    "⏰ *Zaman:* `" + time_str + "`"
                 )
 
                 if send_telegram_message(token, chat_id, msg):
@@ -231,8 +232,8 @@ class TelegramWorker:
 # ───────────────────────────────────────────────
 # STREAMLIT UI
 # ───────────────────────────────────────────────
-def init_session_state() -> None:
-    """Session state değişkenlerini başlatır."""
+def init_session_state():
+    """Session state degiskenlerini baslatir."""
     defaults = {
         "bot_config": {
             "active": False,
@@ -249,11 +250,11 @@ def init_session_state() -> None:
             st.session_state[key] = val
 
 
-def render_sidebar() -> dict:
-    """Sidebar\'ı render eder ve config sözlüğünü döndürür."""
-    st.sidebar.header("⚙️ Bot & Filtre Ayarları")
+def render_sidebar():
+    """Sidebar'i render eder ve config sozlugunu dondurur."""
+    st.sidebar.header("⚙️ Bot & Filtre Ayarlari")
 
-    # Secrets\'ten varsayılan değerler
+    # Secrets'ten varsayilan degerler
     default_token = ""
     default_chat_id = ""
     try:
@@ -262,7 +263,7 @@ def render_sidebar() -> dict:
     except Exception:
         pass
 
-    # Önceki değerleri session_state\'ten al
+    # Onceki degerleri session_state'ten al
     prev_cfg = st.session_state.get("bot_config", {})
 
     token = st.sidebar.text_input(
@@ -286,7 +287,7 @@ def render_sidebar() -> dict:
     )
 
     min_chg = st.sidebar.number_input(
-        "Minimum Değişim (%)",
+        "Minimum Degisim (%)",
         min_value=0.0,
         value=float(prev_cfg.get("min_change", 2.0)),
         step=0.5,
@@ -294,7 +295,7 @@ def render_sidebar() -> dict:
     )
 
     interval = st.sidebar.slider(
-        "Tarama Sıklığı (Saniye)",
+        "Tarama Sikligi (Saniye)",
         min_value=10,
         max_value=300,
         value=int(prev_cfg.get("interval", 60)),
@@ -321,39 +322,39 @@ def render_sidebar() -> dict:
 # ───────────────────────────────────────────────
 # MAIN
 # ───────────────────────────────────────────────
-def main() -> None:
+def main():
     init_session_state()
 
-    # Sidebar render et ve config\'i session_state\'e kaydet
+    # Sidebar render et ve config'i session_state'e kaydet
     cfg = render_sidebar()
     st.session_state["bot_config"] = cfg
 
-    # Background worker\'ı başlat (idempotent)
+    # Background worker'i baslat (idempotent)
     worker = TelegramWorker()
     worker.start()
 
     # ── DASHBOARD ──
-    st.title("📊 Kripto Piyasası Taraması & Sinyal Paneli")
+    st.title("📊 Kripto Piyasasi Taramasi & Sinyal Paneli")
 
     col_btn, col_info = st.columns([1, 4])
     with col_btn:
-        if st.button("🔄 Verileri Şimdi Yenile", use_container_width=True):
+        if st.button("🔄 Verileri Simdi Yenile", use_container_width=True):
             st.cache_data.clear()
             st.session_state["last_scan_time"] = datetime.now(timezone.utc)
 
-    # Verileri çek
-    @st.cache_data(ttl=15, show_spinner="Veriler yükleniyor...")
+    # Verileri cek
+    @st.cache_data(ttl=15, show_spinner="Veriler yukleniyor...")
     def _cached_fetch():
         return fetch_bybit_tickers()
 
     df, err_msg = _cached_fetch()
 
     if err_msg:
-        st.error(f"❌ {err_msg}")
+        st.error("❌ " + err_msg)
         st.stop()
 
     if df.empty:
-        st.warning("⚠️ API verisi alındı fakat işlenecek USDT çifti bulunamadı.")
+        st.warning("⚠️ API verisi alindi fakat islenecek USDT cifti bulunamadi.")
         st.stop()
 
     # Filtrele
@@ -376,7 +377,7 @@ def main() -> None:
     st.divider()
 
     # Tablo
-    st.subheader("🎯 Filtreye Uyan Varlıklar")
+    st.subheader("🎯 Filtreye Uyan Varliklar")
 
     if not filtered.empty:
         st.dataframe(
@@ -387,7 +388,7 @@ def main() -> None:
                     "Fiyat ($)", format="$%.4f", width="medium"
                 ),
                 "priceChangePercent": st.column_config.NumberColumn(
-                    "24h Değişim (%)",
+                    "24h Degisim (%)",
                     format="%.2f%%",
                     width="medium",
                 ),
@@ -400,8 +401,8 @@ def main() -> None:
         )
     else:
         st.info(
-            "ℹ️ Belirlenen filtre kriterlerine uyan coin bulunamadı. "
-            "Filtre değerlerini düşürmeyi deneyin."
+            "ℹ️ Belirlenen filtre kriterlerine uyan coin bulunamadi. "
+            "Filtre degerlerini dusurmeyi deneyin."
         )
 
 
