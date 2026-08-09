@@ -1,7 +1,3 @@
 streamlit
 pandas
 requests
-cloudscraper
-curl_cffi
-free-proxy
-ccxt
