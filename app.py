@@ -3,6 +3,7 @@ from threading import Thread, Lock
 import pandas as pd
 import requests
 import streamlit as st
+import ccxt
 
 st.set_page_config(
     page_title="Crypto Scanner & Telegram Bot", layout="wide"
@@ -76,88 +77,79 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- KESİNTİSİZ VERİ ÇEKME FONKSİYONU ---
+# --- KESİNTİSİZ VERİ ÇEKME (CCXT + FALLBACKS) ---
 def _raw_fetch_bybit_data():
+    last_error = ""
+
+    # Yöntem 1: CCXT Kütüphanesi ile Vadeli (Linear) Tickers
+    try:
+        exchange = ccxt.bybit({
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'swap',
+            },
+            'headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+            }
+        })
+        tickers = exchange.fetch_tickers()
+        
+        parsed_data = []
+        for symbol, data in tickers.items():
+            if symbol.endswith("/USDT:USDT") or symbol.endswith("/USDT"):
+                raw_symbol = symbol.split(":")[0].replace("/", "")
+                last_price = data.get('last')
+                percentage = data.get('percentage')
+                quote_volume = data.get('quoteVolume')
+
+                if last_price is not None and percentage is not None and quote_volume is not None:
+                    parsed_data.append({
+                        "symbol": raw_symbol,
+                        "lastPrice": float(last_price),
+                        "priceChangePercent": float(percentage),
+                        "quoteVolume": float(quote_volume) / 1_000_000
+                    })
+        
+        if parsed_data:
+            df = pd.DataFrame(parsed_data)
+            return df, None
+    except Exception as e:
+        last_error = f"CCXT Hatası: {str(e)}"
+
+    # Yöntem 2: Direct CDN REST Endpoint Bypass (Alternative Domain)
     endpoints = [
         "https://api.bybit.com/v5/market/tickers?category=linear",
-        "https://api.bytick.com/v5/market/tickers?category=linear",
-        "https://api-testnet.bybit.com/v5/market/tickers?category=linear"
+        "https://api.bytick.com/v5/market/tickers?category=linear"
     ]
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     }
 
-    res = None
-    last_error = ""
-
-    # Katman 1: Standart requests + Custom Headers
     for url in endpoints:
         try:
-            r = requests.get(url, headers=headers, timeout=6)
+            r = requests.get(url, headers=headers, timeout=8)
             if r.status_code == 200:
-                res = r
-                break
+                res_data = r.json()
+                ticker_list = res_data.get("result", {}).get("list", [])
+                if ticker_list:
+                    df = pd.DataFrame(ticker_list)
+                    df = df[df["symbol"].str.endswith("USDT")].copy()
+                    df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
+                    df["priceChangePercent"] = pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
+                    df["quoteVolume"] = pd.to_numeric(df["turnover24h"], errors="coerce") / 1_000_000
+                    df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
+                    return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]], None
         except Exception as e:
-            last_error = str(e)
+            last_error = f"REST Hatası: {str(e)}"
 
-    # Katman 2: curl_cffi (TLS Impersonation)
-    if res is None:
-        try:
-            from curl_cffi import requests as curl_requests
-            for url in endpoints:
-                r = curl_requests.get(url, impersonate="chrome120", timeout=8)
-                if r.status_code == 200:
-                    res = r
-                    break
-        except Exception as e:
-            last_error = str(e)
-
-    # Katman 3: cloudscraper
-    if res is None:
-        try:
-            import cloudscraper
-            scraper = cloudscraper.create_scraper()
-            for url in endpoints:
-                r = scraper.get(url, timeout=8)
-                if r.status_code == 200:
-                    res = r
-                    break
-        except Exception as e:
-            last_error = str(e)
-
-    if res is None:
-        return pd.DataFrame(), f"Tüm API kanalları başarısız oldu. Son Hata: {last_error}"
-
-    try:
-        data = res.json()
-        if data.get("retCode") != 0:
-            return pd.DataFrame(), f"Bybit Hata Kodu: {data.get('retCode')} - {data.get('retMsg')}"
-
-        ticker_list = data.get("result", {}).get("list", [])
-        if not ticker_list:
-            return pd.DataFrame(), "API başarılı yanıt verdi ancak sembol listesi boş."
-
-        df = pd.DataFrame(ticker_list)
-        
-        # Sadece USDT perpetual (Vadeli) çiftleri al
-        df = df[df["symbol"].str.endswith("USDT")].copy()
-
-        # Sayısal dönüşümler
-        df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
-        df["priceChangePercent"] = pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
-        df["quoteVolume"] = pd.to_numeric(df["turnover24h"], errors="coerce") / 1_000_000
-
-        df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
-        return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]], None
-
-    except Exception as e:
-        return pd.DataFrame(), f"JSON Format/Veri İşleme Hatası: {str(e)}"
+    return pd.DataFrame(), f"Tüm bağlantı yöntemleri engellendi. Detay: {last_error}"
 
 
-# Streamlit arayüzü için önbellekli versiyon
+# Streamlit önbellekleme
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_market_data_cached():
     return _raw_fetch_bybit_data()
