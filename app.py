@@ -21,16 +21,16 @@ def get_secret(section, key, default=""):
 DEFAULT_TOKEN = get_secret("telegram", "bot_token", "8736398780:AAFWxPurStPIts--TYjHZccPpjVNnIk02Sg")
 DEFAULT_CHAT_ID = get_secret("telegram", "chat_id", "-1004436877206")
 
-# Thread'ler arası güvenli veri paylaşımı (Optimizasyonlar eklendi)
+# Thread'ler arası güvenli veri paylaşımı
 GLOBAL_CONFIG = {
     "active": False,
     "token": DEFAULT_TOKEN,
     "chat_id": DEFAULT_CHAT_ID,
     "min_volume": 10.0,
     "min_change": 2.0,
-    "rsi_min": 40,            # Optimal Momentum Giriş Sınırı
-    "rsi_max": 62,            # Tepede Şişmeyi Önleme Sınırı
-    "use_ema_filter": True,   # Yükselen Trend Zorunlu
+    "rsi_min": 40,
+    "rsi_max": 62,
+    "use_ema_filter": True,
     "interval": 60,
 }
 config_lock = Lock()
@@ -56,6 +56,20 @@ def calculate_atr(df, period=14):
     atr = tr.rolling(window=period).mean()
     return atr.iloc[-1]
 
+def calculate_pivot_points(df):
+    """Klasik Pivot Points (P, R1, R2, S1, S2) Hesaplaması"""
+    high = df["h"].iloc[-1]
+    low = df["l"].iloc[-1]
+    close = df["c"].iloc[-1]
+    
+    pivot = (high + low + close) / 3.0
+    r1 = (2 * pivot) - low
+    s1 = (2 * pivot) - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    
+    return round(pivot, 4), round(r1, 4), round(r2, 4), round(s1, 4), round(s2, 4)
+
 
 # --- SIDEBAR & FILTERS ---
 st.sidebar.header("⚙️ Bot & Genel Ayarlar")
@@ -75,8 +89,7 @@ min_change_pct = st.sidebar.number_input("Minimum Değişim (%)", value=2.0, ste
 st.sidebar.markdown("---")
 st.sidebar.header("📈 Optimal Teknik Filtreler")
 
-# Varsayılan strateji değerleri: RSI 40-62 ve EMA Trend Aktif
-rsi_range = st.sidebar.slider("RSI (14) Aralığı (Önerilen: 40-62)", 0, 100, (40, 62))
+rsi_range = st.sidebar.slider("RSI (14) Aralığı", 0, 100, (40, 62))
 use_ema_filter = st.sidebar.checkbox("Sadece Yükselen Trenddekileri Göster (EMA20 > EMA50)", value=True)
 
 with config_lock:
@@ -107,14 +120,18 @@ def send_telegram_signal(token, chat_id, row):
     tp1 = row.get('tp1_price', 0)
     tp2 = row.get('tp2_price', 0)
     
-    # Akıllı Momentum Notu
-    if rsi < 45:
-        rsi_note = "🟢 Dip Katlama Potansiyeli"
-    elif rsi <= 58:
-        rsi_note = "🚀 Güçlü Momentum Kırılımı"
-    else:
-        rsi_note = "⚠️ Dirence Yakın / Dikkat"
-        
+    pivot = row.get('pivot', 0)
+    r1 = row.get('r1', 0)
+    r2 = row.get('r2', 0)
+    s1 = row.get('s1', 0)
+    
+    # Direnç Kontrol Uyarısı
+    resistance_warn = ""
+    if price >= r1 * 0.99 and price <= r1 * 1.01:
+        resistance_warn = "\n⚠️ *UYARI:* Fiyat R1 Direncine Çok Yakın!"
+    elif price >= r2 * 0.99:
+        resistance_warn = "\n⚠️ *UYARI:* Fiyat R2 Direnç Bölgesinde!"
+
     message = (
         f"🚨 *YÜKSEK OLASILIKLI KRİPTO SİNYALİ* 🚨\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -122,15 +139,19 @@ def send_telegram_signal(token, chat_id, row):
         f"💵 *Giriş (Entry):* `${price:.4f}`\n"
         f"📈 *24h Değişim:* `%{change:+.2f}`\n"
         f"💰 *24h Hacim:* `${volume:.2f}M`\n"
-        f"📊 *RSI (14):* `{rsi:.1f}` ({rsi_note})\n"
-        f"📐 *Trend Durumu:* `{ema_status}`\n"
+        f"📊 *RSI (14):* `{rsi:.1f}` | *Trend:* `{ema_status}`{resistance_warn}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 *RİSK & HEDEF SEVİYELERİ (ATR)*\n"
+        f"🎯 *ATR RİSK & HEDEF SEVİYELERİ*\n"
         f"🛑 *Stop-Loss (SL):* `${sl:.4f}` (`-%{((price-sl)/price)*100:.2f}`)\n"
         f"🎯 *Hedef 1 (TP1 - 1:1.5):* `${tp1:.4f}` (`+%{((tp1-price)/price)*100:.2f}`)\n"
         f"🚀 *Hedef 2 (TP2 - 1:2.0):* `${tp2:.4f}` (`+%{((tp2-price)/price)*100:.2f}`)\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *İşlem Öncesi:* Lütfen aşağıdaki butonla grafiği açıp **üst majör direnci** kontrol ediniz.\n"
+        f"📐 *OTOMATİK PIVOT DESTEK / DİRENÇ*\n"
+        f"🔴 *Direnç 2 (R2):* `${r2:.4f}`\n"
+        f"🔴 *Direnç 1 (R1):* `${r1:.4f}`\n"
+        f"⚪ *Pivot (P):* `${pivot:.4f}`\n"
+        f"🟢 *Destek 1 (S1):* `${s1:.4f}`\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
         f"⏰ *Zaman:* `{time.strftime('%H:%M:%S')}`\n"
     )
     
@@ -141,7 +162,7 @@ def send_telegram_signal(token, chat_id, row):
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "📈 TradingView Grafiği (Direnç Kontrolü)", "url": tradingview_url},
+                {"text": "📈 TradingView Grafiği", "url": tradingview_url},
                 {"text": "🔗 OKX'te İncele", "url": okx_url}
             ]
         ]
@@ -160,7 +181,7 @@ def send_telegram_signal(token, chat_id, row):
         print(f"Telegram Hatası: {e}")
 
 
-# --- OKX TEKNİK & ATR VERİ ÇEKME ---
+# --- OKX TEKNİK, ATR & PIVOT VERİ ÇEKME ---
 def fetch_kline_indicators(inst_id, current_price):
     url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=60"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -180,6 +201,9 @@ def fetch_kline_indicators(inst_id, current_price):
                 ema50_series = calculate_ema(df_kline["c"], 50)
                 atr_val = calculate_atr(df_kline, 14)
                 
+                # Pivot Points Hesaplama
+                pivot, r1, r2, s1, s2 = calculate_pivot_points(df_kline)
+                
                 latest_rsi = rsi_series.iloc[-1]
                 latest_ema20 = ema20_series.iloc[-1]
                 latest_ema50 = ema50_series.iloc[-1]
@@ -198,7 +222,8 @@ def fetch_kline_indicators(inst_id, current_price):
                     is_bullish,
                     round(sl_price, 4),
                     round(tp1_price, 4),
-                    round(tp2_price, 4)
+                    round(tp2_price, 4),
+                    pivot, r1, r2, s1, s2
                 )
     except Exception:
         pass
@@ -206,7 +231,7 @@ def fetch_kline_indicators(inst_id, current_price):
     sl = current_price * 0.97
     tp1 = current_price * 1.045
     tp2 = current_price * 1.06
-    return 50.0, "N/A", False, round(sl, 4), round(tp1, 4), round(tp2, 4)
+    return 50.0, "N/A", False, round(sl, 4), round(tp1, 4), round(tp2, 4), 0, 0, 0, 0, 0
 
 
 def _raw_fetch_okx_data():
@@ -255,7 +280,7 @@ def fetch_market_data_cached():
 
 
 # --- DASHBOARD ---
-st.title("📊 Kripto Piyasası Taraması & Risk/Ödül Analiz Paneli")
+st.title("📊 Kripto Piyasası Taraması & Advanced Pivot/ATR Analiz Paneli")
 
 col_b1, col_b2 = st.columns([1, 4])
 with col_b1:
@@ -268,7 +293,6 @@ if err_msg:
     st.error(f"❌ Veri Çekme Hatası: {err_msg}")
 
 if not df_raw.empty:
-    # Sadece pozitif değişim gösteren (yükselen) coinleri tara
     base_filtered = df_raw[
         (df_raw["quoteVolume"] >= min_volume_m) &
         (df_raw["priceChangePercent"] >= min_change_pct)
@@ -280,15 +304,21 @@ if not df_raw.empty:
     sl_list = []
     tp1_list = []
     tp2_list = []
+    pivot_list = []
+    r1_list = []
+    r2_list = []
 
     for _, row in base_filtered.iterrows():
-        rsi_val, ema_stat, is_bull, sl, tp1, tp2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
+        rsi_val, ema_stat, is_bull, sl, tp1, tp2, p, r1, r2, s1, s2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
         rsi_list.append(rsi_val)
         ema_status_list.append(ema_stat)
         is_bullish_list.append(is_bull)
         sl_list.append(sl)
         tp1_list.append(tp1)
         tp2_list.append(tp2)
+        pivot_list.append(p)
+        r1_list.append(r1)
+        r2_list.append(r2)
 
     base_filtered["rsi"] = rsi_list
     base_filtered["ema_status"] = ema_status_list
@@ -296,6 +326,9 @@ if not df_raw.empty:
     base_filtered["sl_price"] = sl_list
     base_filtered["tp1_price"] = tp1_list
     base_filtered["tp2_price"] = tp2_list
+    base_filtered["pivot"] = pivot_list
+    base_filtered["r1"] = r1_list
+    base_filtered["r2"] = r2_list
 
     final_df = base_filtered[
         (base_filtered["rsi"] >= rsi_range[0]) &
@@ -311,9 +344,9 @@ if not df_raw.empty:
     col2.metric("Filtreye Uyan Semboller", len(final_df))
     col3.metric("Bot Durumu", "Aktif" if bot_active else "Pasif")
 
-    st.subheader("🎯 Otomatik Risk & Hedef Analizli Varlıklar")
+    st.subheader("🎯 Risk/Ödül & Pivot Seviyeli Varlıklar")
     st.dataframe(
-        final_df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume", "rsi", "sl_price", "tp1_price", "tp2_price"]],
+        final_df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume", "rsi", "sl_price", "tp1_price", "r1", "r2"]],
         column_config={
             "symbol": "Sembol",
             "lastPrice": st.column_config.NumberColumn("Giriş ($)", format="$%.4f"),
@@ -321,8 +354,9 @@ if not df_raw.empty:
             "quoteVolume": st.column_config.NumberColumn("24h Hacim (M$)", format="$%.2fM"),
             "rsi": st.column_config.NumberColumn("RSI (14)", format="%.1f"),
             "sl_price": st.column_config.NumberColumn("🛑 Stop-Loss", format="$%.4f"),
-            "tp1_price": st.column_config.NumberColumn("🎯 Hedef 1 (TP1)", format="$%.4f"),
-            "tp2_price": st.column_config.NumberColumn("🚀 Hedef 2 (TP2)", format="$%.4f"),
+            "tp1_price": st.column_config.NumberColumn("🎯 TP1 (1:1.5)", format="$%.4f"),
+            "r1": st.column_config.NumberColumn("🔴 Direnç 1 (R1)", format="$%.4f"),
+            "r2": st.column_config.NumberColumn("🔴 Direnç 2 (R2)", format="$%.4f"),
         },
         use_container_width=True,
     )
@@ -351,7 +385,7 @@ def telegram_worker():
                     sym = row["symbol"]
                     
                     if sym not in sent_signals or (current_time - sent_signals[sym]) > cooldown_seconds:
-                        rsi_val, ema_stat, is_bull, sl, tp1, tp2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
+                        rsi_val, ema_stat, is_bull, sl, tp1, tp2, p, r1, r2, s1, s2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
                         
                         rsi_pass = (cfg["rsi_min"] <= rsi_val <= cfg["rsi_max"])
                         ema_pass = (not cfg["use_ema_filter"]) or is_bull
@@ -363,6 +397,11 @@ def telegram_worker():
                             row_dict["sl_price"] = sl
                             row_dict["tp1_price"] = tp1
                             row_dict["tp2_price"] = tp2
+                            row_dict["pivot"] = p
+                            row_dict["r1"] = r1
+                            row_dict["r2"] = r2
+                            row_dict["s1"] = s1
+                            row_dict["s2"] = s2
                             
                             send_telegram_signal(cfg["token"], cfg["chat_id"], row_dict)
                             sent_signals[sym] = current_time
