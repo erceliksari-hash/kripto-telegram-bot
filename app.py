@@ -61,11 +61,16 @@ enable_auto_telegram = st.sidebar.checkbox(
 
 st.sidebar.markdown("---")
 
-# Genel Taranacak Semboller
+# Genel Taranacak Semboller (RESİMLERDEKİ TÜM COINLER EKLENDİ)
 st.sidebar.subheader("📝 Genel Taranacak Semboller")
-default_symbols = "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT"
+default_symbols = (
+    "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, "
+    "ADAUSDT, DOTUSDT, SHIBUSDT, MATICUSDT, LTCUSDT, TRONUSDT, UNIUSDT, ATOMUSDT, "
+    "APTUSDT, ARBUSDT, OPUSDT, INJUSDT, SUIUSDT, FETUSDT, RENDERUSDT, PEPEUSDT, "
+    "FLOKIUSDT, BONKUSDT, TIAUSDT, SEIUSDT, FILUSDT, ICPUSDT"
+)
 symbol_input = st.sidebar.text_area(
-    "Semboller (Virgülle ayırın)", value=default_symbols, height=80
+    "Semboller (Virgülle ayırın)", value=default_symbols, height=120
 )
 custom_symbol_list = [
     s.strip().upper()
@@ -174,7 +179,7 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
             atr_val = float(latest["atr"])
             return {
                 "Sembol": symbol,
-                "Kaynak Borsa": ex_name,  # Hangi borsadan çekildiğini gösterir
+                "Kaynak Borsa": ex_name,
                 "Fiyat ($)": price,
                 "24h Değişim (%)": round(change_24h, 2),
                 "24h Hacim (M$)": round(vol_24h_m, 2),
@@ -187,7 +192,6 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
             }
 
         except Exception:
-            # Seçilen borsada yoksa bir sonraki borsaya geçer
             continue
 
     return None
