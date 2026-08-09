@@ -74,25 +74,46 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- RAW API VERI ÇEKME (THREAD VE STREAMLIT ORTAK KULLANIR) ---
+# --- RAW API VERI ÇEKME (GITHUB ACTIONS, CLOUDFLARE & BYPASS DESTEKLİ) ---
 def _raw_fetch_bybit_data():
-    # Tüm liste için limit=1000 eklendi
     url = "https://api.bybit.com/v5/market/tickers?category=linear&limit=1000"
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    alt_url = "https://api.bytick.com/v5/market/tickers?category=linear&limit=1000"
+    
+    res = None
+    
+    # 1. YÖNTEM: curl_cffi ile TLS Parmak İzi Taklidi (GitHub IP Engellerini Aşmada En Etkilisi)
+    try:
+        from curl_cffi import requests as curl_requests
+        res = curl_requests.get(url, impersonate="chrome120", timeout=10)
+        if res.status_code == 403:
+            res = curl_requests.get(alt_url, impersonate="chrome120", timeout=10)
+    except Exception:
+        # 2. YÖNTEM: curl_cffi başarısız olursa cloudscraper'a düş
+        try:
+            import cloudscraper
+            scraper = cloudscraper.create_scraper(
+                browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+            )
+            res = scraper.get(url, timeout=10)
+            if res.status_code == 403:
+                res = scraper.get(alt_url, timeout=10)
+        except Exception as e:
+            return pd.DataFrame(), f"Kütüphane Yükleme/İstek Hatası: {str(e)}"
+
+    if res is None or res.status_code != 200:
+        status_code = res.status_code if res else "Yanıt Yok"
+        return (
+            pd.DataFrame(),
+            f"Bybit API HTTP Hatası: {status_code} (GitHub/Cloudflare Engeli)",
         )
-    }
 
     try:
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code != 200:
-            return (
-                pd.DataFrame(),
-                f"Bybit API HTTP Hatası: {res.status_code}",
-            )
-
         data = res.json()
+        
+        # API yanıtındaki retCode kontrolü
+        if data.get("retCode") != 0:
+            return pd.DataFrame(), f"Bybit API Hata Mesajı: {data.get('retMsg')}"
+
         ticker_list = data.get("result", {}).get("list", [])
 
         if not ticker_list:
@@ -122,7 +143,7 @@ def _raw_fetch_bybit_data():
         )
 
     except Exception as e:
-        return pd.DataFrame(), f"İstek Hatası: {str(e)}"
+        return pd.DataFrame(), f"Veri İşleme Hatası: {str(e)}"
 
 
 # Streamlit arayüzü için önbellekli versiyon
