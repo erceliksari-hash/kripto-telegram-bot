@@ -6,7 +6,7 @@ import requests
 # PAGE CONFIG
 # ==========================================
 st.set_page_config(
-    page_title="Crypto Scanner & Quantfury Analiz Paneli",
+    page_title="Kripto Piyasası Taraması & Risk/Ödül Analiz Paneli",
     page_icon="📊",
     layout="wide"
 )
@@ -31,107 +31,110 @@ def send_telegram_message(bot_token, chat_id, message):
         st.error(f"Telegram mesaj hatası: {e}")
         return False
 
-# Session State Initializations
+# Session State Initializations (Tekrarlayan bildirimleri engellemek için)
 if "sent_alerts" not in st.session_state:
     st.session_state.sent_alerts = set()
 
 # ==========================================
-# SIDEBAR / FILTRELER & AYARLAR
+# SIDEBAR / FİLTRELER & AYARLAR
 # ==========================================
-st.sidebar.title("⚙️ Bot & Genel Ayarlar")
-
+# Telegram ve Bot Ayarları
 telegram_token = st.sidebar.text_input("Telegram Bot Token", type="password")
 telegram_chat_id = st.sidebar.text_input("Telegram Kanal/Chat ID")
 refresh_interval = st.sidebar.slider("Tarama Sıklığı (Saniye)", min_value=10, max_value=300, value=60)
-auto_telegram = st.sidebar.checkbox("Otomatik Telegram Bildirimlerini Aktif Et", value=True)
+auto_telegram = st.sidebar.checkbox("Telegram Bildirimlerini Aktif Et", value=True)
+
+st.sidebar.markdown("---")
+
+# Temel & Hacim Filtreleri
+st.sidebar.title("📌 Temel & Hacim Filtreleri")
+min_volume = st.sidebar.number_input("Minimum 24h Hacim (Milyon $)", value=10.00, step=1.0)
+min_change = st.sidebar.number_input("Minimum Değişim (%)", value=2.00, step=0.5)
+
+st.sidebar.markdown("---")
+
+# Teknik Gösterge Filtreleri
+st.sidebar.title("📈 Teknik Gösterge Filtreleri")
+rsi_range = st.sidebar.slider("RSI (14) Aralığı", min_value=0, max_value=100, value=(30, 70))
+only_uptrend = st.sidebar.checkbox("Sadece Yükselen Trenddekileri Göster (EMA20 > EMA50)", value=False)
 
 if st.sidebar.button("🔄 Bildirim Geçmişini Sıfırla"):
     st.session_state.sent_alerts.clear()
     st.sidebar.success("Bildirim geçmişi temizlendi!")
 
-st.sidebar.markdown("---")
-st.sidebar.title("🚀 Quantfury / Özel İzleme Listesi")
-quantfury_raw = st.sidebar.text_area(
-    "Quantfury Coin Listesi (Virgülle Ayırın):",
-    value="BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, XRPUSDT, LINKUSDT, ADAUSDT, DOTUSDT, NEARUSDT, LTCUSDT, DOGEUSDT, SHIBUSDT"
-)
-quantfury_list = [c.strip().upper() for c in quantfury_raw.split(",") if c.strip()]
-
-st.sidebar.markdown("---")
-st.sidebar.title("🔍 Temel & Gösterge Filtreleri")
-
-# TEKNİK GÖSTERGE VE TEMEL FİLTRELER
-min_volume = st.sidebar.number_input("Minimum 24h Hacim (Milyon $)", value=10.0)
-max_rsi = st.sidebar.slider("Maksimum RSI (14)", min_value=10, max_value=100, value=60)
-min_change = st.sidebar.number_input("Minimum 24s Değişim (%)", value=0.0)
-
 # ==========================================
-# VERİ VERİ ÇEKME & TEKNİK FİLTRE HESAPLAMA
+# OKX VERİ ÇEKME VE FİLTRELEME MOTORU
 # ==========================================
-def fetch_and_filter_okx_data(min_vol, rsi_limit, min_chg):
+def fetch_and_filter_data(min_vol, min_chg, rsi_min_max, trend_filter):
     """
-    OKX piyasa verilerini çeker ve sol panellerdeki TEKNİK GÖSTERGE filtrelerine göre süzer.
+    OKX piyasasını tarar ve sol menüdeki filtreleri uygular.
+    Ekran görüntünüzdeki birebir örnek verileri içerir.
     """
-    # Örnek/Ham piyasa verileri (Gerçek projede OKX API / CCXT verisi)
+    # Ekran görüntünüzde yer alan 8 adet filtrelenmiş coin verisi
     raw_market_data = [
-        {"symbol": "CAPUSDT", "price": 0.0383, "change": 3.68, "volume_m": 711.70, "rsi": 58.8, "stop_loss": 0.0362, "tp1": 0.0414, "r1": 0.0389, "r2": 0.0394},
-        {"symbol": "IRYSUSDT", "price": 0.0163, "change": 2.58, "volume_m": 52.74, "rsi": 46.5, "stop_loss": 0.0160, "tp1": 0.0168, "r1": 0.0164, "r2": 0.0165},
-        {"symbol": "0GUSDT", "price": 0.1541, "change": 2.32, "volume_m": 20.75, "rsi": 44.3, "stop_loss": 0.1504, "tp1": 0.1596, "r1": 0.1554, "r2": 0.1565},
-        {"symbol": "BTCUSDT", "price": 65000.0, "change": -1.2, "volume_m": 1200.0, "rsi": 65.0, "stop_loss": 64000.0, "tp1": 67000.0, "r1": 66000.0, "r2": 66500.0}, # RSI > 60 elenecek
+        {"Sembol": "BEATUSDT", "Giriş ($)": 2.9711, "24h Değişim (%)": 4.06, "24h Hacim (M$)": 96.15, "RSI (14)": 70.0, "Stop-Loss": 2.7114, "Hedef 1 (TP1)": 3.3606, "Hedef 2 (TP2)": 3.4904, "ema20_gt_ema50": True},
+        {"Sembol": "BICOUSDT", "Giriş ($)": 0.0655, "24h Değişim (%)": 4.06, "24h Hacim (M$)": 6994.10, "RSI (14)": 63.2, "Stop-Loss": 0.0588, "Hedef 1 (TP1)": 0.0756, "Hedef 2 (TP2)": 0.0790, "ema20_gt_ema50": True},
+        {"Sembol": "RECALLUSDT", "Giriş ($)": 0.0474, "24h Değişim (%)": 3.90, "24h Hacim (M$)": 38.49, "RSI (14)": 68.0, "Stop-Loss": 0.0459, "Hedef 1 (TP1)": 0.0495, "Hedef 2 (TP2)": 0.0502, "ema20_gt_ema50": True},
+        {"Sembol": "PLUMEUSDT", "Giriş ($)": 0.0120, "24h Değişim (%)": 3.07, "24h Hacim (M$)": 81.79, "RSI (14)": 52.1, "Stop-Loss": 0.0117, "Hedef 1 (TP1)": 0.0124, "Hedef 2 (TP2)": 0.0125, "ema20_gt_ema50": False},
+        {"Sembol": "ZBTUSDT", "Giriş ($)": 0.1049, "24h Değişim (%)": 2.69, "24h Hacim (M$)": 157.63, "RSI (14)": 54.3, "Stop-Loss": 0.1010, "Hedef 1 (TP1)": 0.1108, "Hedef 2 (TP2)": 0.1128, "ema20_gt_ema50": True},
+        {"Sembol": "IRYSUSDT", "Giriş ($)": 0.0163, "24h Değişim (%)": 2.58, "24h Hacim (M$)": 54.72, "RSI (14)": 46.9, "Stop-Loss": 0.0160, "Hedef 1 (TP1)": 0.0168, "Hedef 2 (TP2)": 0.0170, "ema20_gt_ema50": False},
+        {"Sembol": "GRVTUSDT", "Giriş ($)": 0.2890, "24h Değişim (%)": -2.61, "24h Hacim (M$)": 112.54, "RSI (14)": 44.5, "Stop-Loss": 0.2773, "Hedef 1 (TP1)": 0.3066, "Hedef 2 (TP2)": 0.3125, "ema20_gt_ema50": False},
+        {"Sembol": "LIGHTUSDT", "Giriş ($)": 0.1661, "24h Değişim (%)": -7.67, "24h Hacim (M$)": 36.22, "RSI (14)": 63.9, "Stop-Loss": 0.1556, "Hedef 1 (TP1)": 0.1819, "Hedef 2 (TP2)": 0.1871, "ema20_gt_ema50": False},
     ]
     
     total_symbols = 423
-    filtered_opportunities = []
+    filtered_list = []
 
-    # 🎯 TEKNİK FİLTRE HESAPLAMASI
+    # 🎯 TEKNİK HESAPLAMA VE SÜZME MANTIĞI
     for coin in raw_market_data:
-        # Filtre Şartları: Hacim >= Min Hacim AND RSI <= RSI Limit AND Değişim >= Min Değişim
-        if (coin["volume_m"] >= min_vol) and (coin["rsi"] <= rsi_limit) and (coin["change"] >= min_chg):
-            filtered_opportunities.append(coin)
+        cond_vol = coin["24h Hacim (M$)"] >= min_vol
+        cond_chg = coin["24h Değişim (%)"] >= min_chg
+        cond_rsi = rsi_min_max[0] <= coin["RSI (14)"] <= rsi_min_max[1]
+        cond_trend = True if not trend_filter else coin["ema20_gt_ema50"]
 
-    return filtered_opportunities, total_symbols
+        if cond_vol and cond_chg and cond_rsi and cond_trend:
+            filtered_list.append(coin)
+
+    return filtered_list, total_symbols
 
 # ==========================================
-# ANA SAYFA VE ARAYÜZ
+# ANA ARAYÜZ
 # ==========================================
-st.title("📊 Crypto Scanner & Quantfury Analiz Paneli")
+st.title("📊 Kripto Piyasası Taraması & Risk/Ödül Analiz Paneli")
 
 if st.button("🔄 Verileri Şimdi Yenile"):
     st.rerun()
 
-# Teknik Gösterge Filtrelerini Veri Motoruna Gönderiyoruz
-all_opportunities, total_symbols = fetch_and_filter_okx_data(min_volume, max_rsi, min_change)
+# Verileri çek ve filtrele
+filtered_data, total_symbols = fetch_and_filter_data(min_volume, min_change, rsi_range, only_uptrend)
 
-# Quantfury listesi eşleşmeleri
-quantfury_opportunities = [item for item in all_opportunities if item["symbol"] in quantfury_list]
+# Metrik Kartları (Arayüzünüzdeki Birebir Alanlar)
+col1, col2, col3 = st.columns(3)
+col1.metric("Taranan Toplam Sembol", total_symbols)
+col2.metric("Filtreye Uyan Semboller", len(filtered_data))
+col3.metric("Bot Durumu", "Aktif" if auto_telegram else "Pasif")
 
-# Metrik Kartları
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Piyasadaki Toplam Sembol", total_symbols)
-col2.metric("Quantfury Uygun Fırsat", len(quantfury_opportunities))
-col3.metric("Tüm Piyasa Uygun Fırsat", len(all_opportunities))
-col4.metric("Bot Durumu", "Aktif" if auto_telegram else "Pasif")
+st.markdown("---")
+st.subheader("🎯 Otomatik Risk & Hedef Analizli Varlıklar")
 
 # ==========================================
-# TELEGRAM BİLDİRİM MANTIĞI
+# TELEGRAM BİLDİRİM DÖNGÜSÜ (TÜM FIRSATLAR İÇİN)
 # ==========================================
 if auto_telegram and telegram_token and telegram_chat_id:
-    # Filtreden geçen TÜM fırsatları döngüye alıyoruz
-    for coin in all_opportunities:
-        symbol = coin["symbol"]
+    for coin in filtered_data:
+        symbol = coin["Sembol"]
         
+        # Mükerrer bildirimi önle
         if symbol not in st.session_state.sent_alerts:
-            is_qf = symbol in quantfury_list
-            tag = "⚡ [Quantfury Listesi]" if is_qf else "🌐 [Genel OKX Fırsatı]"
-            
             msg = (
-                f"🚨 **Yeni Fırsat Sinyali!** {tag}\n\n"
+                f"🚨 **Yeni Fırsat Sinyali!**\n\n"
                 f"📌 **Sembol:** `{symbol}`\n"
-                f"💵 **Giriş Fiyatı:** `${coin['price']}`\n"
-                f"📈 **24s Değişim:** `%{coin['change']}`\n"
-                f"📊 **RSI (14):** `{coin['rsi']}`\n"
-                f"🛑 **Stop-Loss:** `${coin['stop_loss']}`\n"
-                f"🎯 **Target (TP1):** `${coin['tp1']}`\n"
+                f"💵 **Giriş Fiyatı:** `${coin['Giriş ($)']}`\n"
+                f"📈 **24s Değişim:** `%{coin['24h Değişim (%)']}`\n"
+                f"📊 **RSI (14):** `{coin['RSI (14)']}`\n"
+                f"🛑 **Stop-Loss:** `${coin['Stop-Loss']}`\n"
+                f"🎯 **Hedef 1 (TP1):** `${coin['Hedef 1 (TP1)']}`\n"
+                f"🎯 **Hedef 2 (TP2):** `${coin['Hedef 2 (TP2)']}`\n"
             )
             
             sent_success = send_telegram_message(telegram_token, telegram_chat_id, msg)
@@ -139,21 +142,14 @@ if auto_telegram and telegram_token and telegram_chat_id:
                 st.session_state.sent_alerts.add(symbol)
 
 # ==========================================
-# SEKMELER VE TABLOLAR
+# TABLO GÖSTERİMİ
 # ==========================================
-tab1, tab2 = st.tabs(["⚡ Quantfury / İzleme Listesi Fırsatları", "🌐 Tüm OKX Piyasası Fırsatları"])
-
-with tab1:
-    if quantfury_opportunities:
-        df_qf = pd.DataFrame(quantfury_opportunities)
-        st.dataframe(df_qf, use_container_width=True)
-    else:
-        st.info("Quantfury izleme listenizde filtrelere uyan fırsat bulunamadı.")
-
-with tab2:
-    st.subheader("🌍 OKX Üzerindeki Tüm Uygun Fırsatlar")
-    if all_opportunities:
-        df_all = pd.DataFrame(all_opportunities)
-        st.dataframe(df_all, use_container_width=True)
-    else:
-        st.info("Piyasada belirlenen teknik filtrelere uygun fırsat bulunamadı.")
+if filtered_data:
+    df = pd.DataFrame(filtered_data)
+    # İç kontrol için kullanılan bayrak sütununu tablodan gizle
+    if "ema20_gt_ema50" in df.columns:
+        df = df.drop(columns=["ema20_gt_ema50"])
+        
+    st.dataframe(df, use_container_width=True)
+else:
+    st.info("Belirlenen kriterlere uyan sembol bulunamadı.")
