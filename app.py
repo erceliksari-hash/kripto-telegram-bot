@@ -5,7 +5,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Crypto Scanner & Signal Bot", layout="wide"
+    page_title="Crypto Scanner & Advanced Signal Bot", layout="wide"
 )
 
 # Secrets veya Varsayılan Tanımlamalar
@@ -47,6 +47,15 @@ def calculate_rsi(series, period=14):
 def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
+def calculate_atr(df, period=14):
+    """ATR (Average True Range) volatilite hesaplaması"""
+    high_low = df["h"] - df["l"]
+    high_close = (df["h"] - df["c"].shift()).abs()
+    low_close = (df["l"] - df["c"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    return atr.iloc[-1]
+
 
 # --- SIDEBAR & FILTERS ---
 st.sidebar.header("⚙️ Bot & Genel Ayarlar")
@@ -64,7 +73,7 @@ min_volume_m = st.sidebar.number_input("Minimum 24h Hacim (Milyon $)", value=10.
 min_change_pct = st.sidebar.number_input("Minimum Değişim (%)", value=2.0, step=0.5)
 
 st.sidebar.markdown("---")
-st.sidebar.header("📈 Teknik Gösterge Filtreleri (RSI & EMA)")
+st.sidebar.header("📈 Teknik Gösterge Filtreleri")
 
 rsi_range = st.sidebar.slider("RSI (14) Aralığı", 0, 100, (30, 70))
 use_ema_filter = st.sidebar.checkbox("Sadece Yükselen Trenddekileri Göster (EMA20 > EMA50)")
@@ -81,7 +90,7 @@ with config_lock:
     GLOBAL_CONFIG["interval"] = int(scan_interval)
 
 
-# --- TELEGRAM MESAJ GÖNDERİMİ (ŞIK FORMAT & BUTONLU) ---
+# --- TELEGRAM MESAJ GÖNDERİMİ ---
 def send_telegram_signal(token, chat_id, row):
     if not token or not chat_id:
         return
@@ -93,25 +102,29 @@ def send_telegram_signal(token, chat_id, row):
     volume = row['quoteVolume']
     rsi = row.get('rsi', 0)
     ema_status = row.get('ema_status', 'N/A')
+    sl = row.get('sl_price', 0)
+    tp1 = row.get('tp1_price', 0)
+    tp2 = row.get('tp2_price', 0)
     
     direction_emoji = "🟢" if change >= 0 else "🔴"
-    trend_emoji = "🚀 Bullish" if change > 0 else "📉 Bearish"
     
-    # Şık Markdown Mesaj Tasarımı
     message = (
         f"🚨 *KRİPTO SİNYAL ALARMI* 🚨\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *Sembol:* #{symbol}\n"
-        f"💵 *Fiyat:* `${price:.4f}`\n"
+        f"💵 *Giriş (Entry):* `${price:.4f}`\n"
         f"{direction_emoji} *24h Değişim:* `%{change:+.2f}`\n"
         f"💰 *24h Hacim:* `${volume:.2f}M`\n"
-        f"📊 *RSI (14):* `{rsi:.1f}`\n"
-        f"📐 *Trend Durumu:* `{ema_status}`\n"
+        f"📊 *RSI (14):* `{rsi:.1f}` | *Trend:* `{ema_status}`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ *Sinyal Zamanı:* `{time.strftime('%H:%M:%S')}`\n"
+        f"🎯 *RİSK & HEDEF SEVİYELERİ (ATR)*\n"
+        f"🛑 *Stop-Loss (SL):* `${sl:.4f}` (`-%{((price-sl)/price)*100:.2f}`)\n"
+        f"🎯 *Hedef 1 (TP1 - 1:1.5):* `${tp1:.4f}` (`+%{((tp1-price)/price)*100:.2f}`)\n"
+        f"🚀 *Hedef 2 (TP2 - 1:2.0):* `${tp2:.4f}` (`+%{((tp2-price)/price)*100:.2f}`)\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ *Zaman:* `{time.strftime('%H:%M:%S')}`\n"
     )
     
-    # Inline Keyboard (İnceleme / Grafik Butonu)
     clean_sym = symbol.replace("USDT", "-USDT")
     tradingview_url = f"https://www.tradingview.com/chart/?symbol=OKX:{symbol}"
     okx_url = f"https://www.okx.com/trade-swap/{clean_sym.lower()}-swap"
@@ -138,9 +151,8 @@ def send_telegram_signal(token, chat_id, row):
         print(f"Telegram Hatası: {e}")
 
 
-# --- OKX TEKNİK VERİ ÇEKME ---
-def fetch_kline_indicators(inst_id):
-    """Tekil sembol için mum verilerini çekip RSI ve EMA hesaplar."""
+# --- OKX TEKNİK & ATR VERİ ÇEKME ---
+def fetch_kline_indicators(inst_id, current_price):
     url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=60"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -148,24 +160,46 @@ def fetch_kline_indicators(inst_id):
         if r.status_code == 200:
             data = r.json().get("data", [])
             if len(data) >= 50:
-                # OKX mum verisi terstir (en yeni en başta)
                 df_kline = pd.DataFrame(data, columns=["ts", "o", "h", "l", "c", "vol", "volCcy", "volCcyQuote", "confirm"])
                 df_kline["c"] = df_kline["c"].astype(float)
+                df_kline["h"] = df_kline["h"].astype(float)
+                df_kline["l"] = df_kline["l"].astype(float)
                 df_kline = df_kline.iloc[::-1].reset_index(drop=True)
                 
                 rsi_series = calculate_rsi(df_kline["c"], 14)
                 ema20_series = calculate_ema(df_kline["c"], 20)
                 ema50_series = calculate_ema(df_kline["c"], 50)
+                atr_val = calculate_atr(df_kline, 14)
                 
                 latest_rsi = rsi_series.iloc[-1]
                 latest_ema20 = ema20_series.iloc[-1]
                 latest_ema50 = ema50_series.iloc[-1]
                 
                 ema_status = "EMA20 > EMA50 (Boğa)" if latest_ema20 > latest_ema50 else "EMA20 < EMA50 (Ayı)"
-                return round(latest_rsi, 2), ema_status, latest_ema20 > latest_ema50
+                is_bullish = latest_ema20 > latest_ema50
+                
+                # ATR Seviye Hesaplamaları
+                sl_price = max(0.0001, current_price - (1.5 * atr_val))
+                risk_amount = current_price - sl_price
+                tp1_price = current_price + (1.5 * risk_amount)
+                tp2_price = current_price + (2.0 * risk_amount)
+                
+                return (
+                    round(latest_rsi, 2),
+                    ema_status,
+                    is_bullish,
+                    round(sl_price, 4),
+                    round(tp1_price, 4),
+                    round(tp2_price, 4)
+                )
     except Exception:
         pass
-    return 50.0, "N/A", False
+    
+    # Hata durumunda varsayılan değerler
+    sl = current_price * 0.97
+    tp1 = current_price * 1.045
+    tp2 = current_price * 1.06
+    return 50.0, "N/A", False, round(sl, 4), round(tp1, 4), round(tp2, 4)
 
 
 def _raw_fetch_okx_data():
@@ -201,8 +235,7 @@ def _raw_fetch_okx_data():
                     })
 
             if parsed_data:
-                df = pd.DataFrame(parsed_data)
-                return df, None
+                return pd.DataFrame(parsed_data), None
             return pd.DataFrame(), "OKX verisi boş döndü."
         return pd.DataFrame(), f"OKX HTTP Hatası: Kod {r.status_code}"
     except Exception as e:
@@ -215,7 +248,7 @@ def fetch_market_data_cached():
 
 
 # --- DASHBOARD ---
-st.title("📊 Kripto Piyasası Taraması & Sinyal Paneli")
+st.title("📊 Kripto Piyasası Taraması & Risk/Ödül Analiz Paneli")
 
 col_b1, col_b2 = st.columns([1, 4])
 with col_b1:
@@ -228,28 +261,34 @@ if err_msg:
     st.error(f"❌ Veri Çekme Hatası: {err_msg}")
 
 if not df_raw.empty:
-    # 1. Hacim ve Değişim Ön Filtresi
     base_filtered = df_raw[
         (df_raw["quoteVolume"] >= min_volume_m) &
         (df_raw["priceChangePercent"].abs() >= min_change_pct)
     ].copy()
 
-    # 2. Seçilen Varlıklar İçin RSI ve EMA Hesaplama
     rsi_list = []
     ema_status_list = []
     is_bullish_list = []
+    sl_list = []
+    tp1_list = []
+    tp2_list = []
 
     for _, row in base_filtered.iterrows():
-        rsi_val, ema_stat, is_bull = fetch_kline_indicators(row["instId"])
+        rsi_val, ema_stat, is_bull, sl, tp1, tp2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
         rsi_list.append(rsi_val)
         ema_status_list.append(ema_stat)
         is_bullish_list.append(is_bull)
+        sl_list.append(sl)
+        tp1_list.append(tp1)
+        tp2_list.append(tp2)
 
     base_filtered["rsi"] = rsi_list
     base_filtered["ema_status"] = ema_status_list
     base_filtered["is_bullish"] = is_bullish_list
+    base_filtered["sl_price"] = sl_list
+    base_filtered["tp1_price"] = tp1_list
+    base_filtered["tp2_price"] = tp2_list
 
-    # 3. Teknik Filtrelerin Uygulanması
     final_df = base_filtered[
         (base_filtered["rsi"] >= rsi_range[0]) &
         (base_filtered["rsi"] <= rsi_range[1])
@@ -264,16 +303,18 @@ if not df_raw.empty:
     col2.metric("Filtreye Uyan Semboller", len(final_df))
     col3.metric("Bot Durumu", "Aktif" if bot_active else "Pasif")
 
-    st.subheader("🎯 Teknik Filtreye Uyan Varlıklar")
+    st.subheader("🎯 Otomatik Risk & Hedef Analizli Varlıklar")
     st.dataframe(
-        final_df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume", "rsi", "ema_status"]],
+        final_df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume", "rsi", "sl_price", "tp1_price", "tp2_price"]],
         column_config={
             "symbol": "Sembol",
-            "lastPrice": st.column_config.NumberColumn("Fiyat ($)", format="$%.4f"),
+            "lastPrice": st.column_config.NumberColumn("Giriş ($)", format="$%.4f"),
             "priceChangePercent": st.column_config.NumberColumn("24h Değişim (%)", format="%.2f%%"),
             "quoteVolume": st.column_config.NumberColumn("24h Hacim (M$)", format="$%.2fM"),
             "rsi": st.column_config.NumberColumn("RSI (14)", format="%.1f"),
-            "ema_status": "Trend Durumu (EMA)",
+            "sl_price": st.column_config.NumberColumn("🛑 Stop-Loss", format="$%.4f"),
+            "tp1_price": st.column_config.NumberColumn("🎯 Hedef 1 (TP1)", format="$%.4f"),
+            "tp2_price": st.column_config.NumberColumn("🚀 Hedef 2 (TP2)", format="$%.4f"),
         },
         use_container_width=True,
     )
@@ -282,7 +323,7 @@ if not df_raw.empty:
 # --- BACKGROUND WORKER ---
 def telegram_worker():
     sent_signals = {}
-    cooldown_seconds = 1800  # Aynı coin için 30 dakika bildirim koruması
+    cooldown_seconds = 1800
 
     while True:
         with config_lock:
@@ -292,7 +333,6 @@ def telegram_worker():
             data, _ = _raw_fetch_okx_data()
 
             if not data.empty:
-                # 1. Ön Filtreleme
                 matches = data[
                     (data["quoteVolume"] >= cfg["min_volume"]) &
                     (data["priceChangePercent"].abs() >= cfg["min_change"])
@@ -303,10 +343,8 @@ def telegram_worker():
                     sym = row["symbol"]
                     
                     if sym not in sent_signals or (current_time - sent_signals[sym]) > cooldown_seconds:
-                        # 2. Teknik Göstergeleri Çek
-                        rsi_val, ema_stat, is_bull = fetch_kline_indicators(row["instId"])
+                        rsi_val, ema_stat, is_bull, sl, tp1, tp2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
                         
-                        # 3. Teknik Filtre Kontrolü
                         rsi_pass = (cfg["rsi_min"] <= rsi_val <= cfg["rsi_max"])
                         ema_pass = (not cfg["use_ema_filter"]) or is_bull
                         
@@ -314,6 +352,9 @@ def telegram_worker():
                             row_dict = row.to_dict()
                             row_dict["rsi"] = rsi_val
                             row_dict["ema_status"] = ema_stat
+                            row_dict["sl_price"] = sl
+                            row_dict["tp1_price"] = tp1
+                            row_dict["tp2_price"] = tp2
                             
                             send_telegram_signal(cfg["token"], cfg["chat_id"], row_dict)
                             sent_signals[sym] = current_time
