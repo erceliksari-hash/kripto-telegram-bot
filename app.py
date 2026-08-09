@@ -32,7 +32,7 @@ else:
         "TELEGRAM_CHAT_ID", st.secrets.get("chat_id", "")
     )
 
-# Çoklu Borsa Nesnelerini Başlat (Binance, OKX, Bybit, KuCoin)
+# Çoklu Borsa Nesnelerini Başlat (Binance, OKX, Bybit, KuCoin, Coinbase)
 @st.cache_resource
 def init_exchanges():
     exchanges = {
@@ -40,6 +40,7 @@ def init_exchanges():
         "OKX": ccxt.okx({"enableRateLimit": True, "timeout": 8000}),
         "Bybit": ccxt.bybit({"enableRateLimit": True, "timeout": 8000}),
         "KuCoin": ccxt.kucoin({"enableRateLimit": True, "timeout": 8000}),
+        "Coinbase": ccxt.coinbase({"enableRateLimit": True, "timeout": 8000}),
     }
     return exchanges
 
@@ -50,7 +51,7 @@ EXCHANGES = init_exchanges()
 # ==========================================
 st.sidebar.title("⚙️ Panel ve Otomasyon Ayarları")
 
-st.sidebar.success("🟢 **UptimeRobot:** Aktif\n(Tüm borsalar otomatik taranır)")
+st.sidebar.success("🟢 **UptimeRobot:** Aktif\n(5 Borsa Otomatik Taranır)")
 
 st.sidebar.markdown("---")
 
@@ -110,7 +111,7 @@ rsi_min, rsi_max = st.sidebar.slider(
 # ==========================================
 def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
     """
-    Coin'i sırasıyla Binance, OKX, Bybit ve KuCoin üzerinde arar.
+    Coin'i sırasıyla Binance, OKX, Bybit, KuCoin ve Coinbase üzerinde arar.
     Listeli olduğu ilk borsadan veriyi çeker ve borsa adıyla döndürür.
     """
     raw_sym = symbol.replace("/", "").replace("-", "")
@@ -215,7 +216,7 @@ def send_telegram_message(message):
 # ==========================================
 # 6. EKRAN ARAYÜZÜ VE TARAMA
 # ==========================================
-st.title("🌐 Tüm Borsalar Otomatik Kripto Taraması (Binance / OKX / Bybit / KuCoin)")
+st.title("🌐 Tüm Borsalar Otomatik Kripto Taraması (Binance / OKX / Bybit / KuCoin / Coinbase)")
 
 # Taramaları Gerçekleştir
 df_quntry_raw = analyze_symbol_list(quntry_symbol_list, timeframe=quntry_timeframe)
