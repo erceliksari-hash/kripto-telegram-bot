@@ -92,7 +92,10 @@ st.sidebar.markdown("---")
 
 # Quntry Fry Özel Takip Listesi
 st.sidebar.subheader("🍟 Quntry Fry Özel Takip Listesi")
-quntry_default = "BICOUSDT, RECALLUSDT, ZDTUSDT, BEATUSDT"
+quntry_default = "BICOUSDT, RECALLUSDT, ZDTUSDT, BEATUSDT,
+BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, 
+ADAUSDT, DOTUSDT, SHIBUSDT, MATICUSDT, LTCUSDT, TRONUSDT, UNIUSDT, ATOMUSDT, APTUSDT, ARBUSDT, 
+OPUSDT, INJUSDT, SUIUSDT, FETUSDT, RENDERUSDT, PEPEUSDT, FLOKIUSDT, BONKUSDT, TIAUSDT, SEIUSDT, FILUSDT, ICPUSDT"
 
 quntry_input = st.sidebar.text_area(
     "Quntry Fry Coinleri (Virgülle ayırın)", value=quntry_default, height=60
