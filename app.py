@@ -17,12 +17,28 @@ st.set_page_config(
 
 
 # ───────────────────────────────────────────────
+# GLOBAL CONFIG (Thread-safe)
+# ───────────────────────────────────────────────
+GLOBAL_CONFIG = {
+    "active": False,
+    "token": "",
+    "chat_id": "",
+    "min_volume": 10.0,
+    "min_change": 2.0,
+    "interval": 60,
+}
+config_lock = Lock()
+
+# Worker thread singleton kontrolu
+_worker_started = False
+_worker_lock = Lock()
+
+
+# ───────────────────────────────────────────────
 # HELPERS
 # ───────────────────────────────────────────────
-def escape_telegram_markdown(text: str) -> str:
-    """
-    Telegram 'Markdown' parse_mode icin ozel karakterleri escape eder.
-    """
+def escape_telegram_markdown(text):
+    """Telegram Markdown parse_mode icin ozel karakterleri escape eder."""
     escape_chars = r"\_*[]()~`>#+-=|{}.!"
     for ch in escape_chars:
         text = text.replace(ch, "\\" + ch)
@@ -30,10 +46,7 @@ def escape_telegram_markdown(text: str) -> str:
 
 
 def fetch_bybit_tickers():
-    """
-    Bybit V5 API'den USDT perpetual ticker verilerini ceker.
-    Returns: (DataFrame, error_message or None)
-    """
+    """Bybit V5 API'den USDT perpetual ticker verilerini ceker."""
     url = "https://api.bybit.com/v5/market/tickers"
     params = {"category": "linear", "limit": 1000}
     headers = {
@@ -49,9 +62,9 @@ def fetch_bybit_tickers():
         resp = requests.get(url, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
     except requests.exceptions.Timeout:
-        return pd.DataFrame(), "Bybit API zaman asimina ugradi. Lutfen tekrar deneyin."
+        return pd.DataFrame(), "Bybit API zaman asimina ugradi."
     except requests.exceptions.ConnectionError:
-        return pd.DataFrame(), "Bybit API'ye baglanilamadi. Internet baglantinizi kontrol edin."
+        return pd.DataFrame(), "Bybit API'ye baglanilamadi."
     except requests.exceptions.HTTPError as e:
         return pd.DataFrame(), f"Bybit API HTTP Hatasi: {e.response.status_code}"
     except requests.exceptions.RequestException as e:
@@ -72,14 +85,11 @@ def fetch_bybit_tickers():
         return pd.DataFrame(), "API yanit verdi fakat liste bos dondu."
 
     df = pd.DataFrame(ticker_list)
-
-    # Sadece USDT ciftleri
     df = df[df["symbol"].astype(str).str.endswith("USDT")].copy()
 
     if df.empty:
         return pd.DataFrame(), "USDT cifti bulunamadi."
 
-    # Sayisal donusumler
     numeric_cols = {
         "lastPrice": "lastPrice",
         "price24hPcnt": "priceChangePercent",
@@ -93,11 +103,7 @@ def fetch_bybit_tickers():
             df[dst] = pd.NA
 
     df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
-
-    # Yuzde formatina cevir
     df["priceChangePercent"] = df["priceChangePercent"] * 100
-
-    # Hacmi milyon $'a cevir
     df["quoteVolume"] = df["quoteVolume"] / 1_000_000
 
     return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]].copy(), None
@@ -107,7 +113,7 @@ def fetch_bybit_tickers():
 # TELEGRAM
 # ───────────────────────────────────────────────
 def send_telegram_message(token, chat_id, message):
-    """Telegram bot uzerinden mesaj gonderir. Basari durumunu dondurur."""
+    """Telegram bot uzerinden mesaj gonderir."""
     if not token or not chat_id:
         return False
 
@@ -130,281 +136,192 @@ def send_telegram_message(token, chat_id, message):
 # ───────────────────────────────────────────────
 # BACKGROUND WORKER
 # ───────────────────────────────────────────────
-class TelegramWorker:
-    """
-    Arka plan thread'i olarak calisan sinyal gonderici.
-    Streamlit session_state uzerinden konfigurasyonu okur.
-    """
+def telegram_worker():
+    """Arka plan thread'i - Streamlit API'si kullanmaz!"""
+    sent_signals = {}
+    cooldown_seconds = 1800  # 30 dakika
+    cleanup_counter = 0
 
-    COOLDOWN_SECONDS = 1800  # 30 dakika
-    SENT_SIGNALS_MAX_SIZE = 5000
+    while True:
+        with config_lock:
+            cfg = dict(GLOBAL_CONFIG)
 
-    def __init__(self):
-        self._thread = None
-        self._lock = Lock()
-        self._sent_signals = {}
-        self._running = False
+        interval = cfg.get("interval", 60)
 
-    def start(self):
-        """Worker thread'ini baslatir (idempotent)."""
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-            self._running = True
-            self._thread = Thread(target=self._run, daemon=True, name="TelegramWorker")
-            self._thread.start()
-
-    def _cleanup_old_signals(self):
-        """Bellek sizintisini onlemek icin eski sinyalleri temizler."""
-        now = time.time()
-        cutoff = now - self.COOLDOWN_SECONDS
-        expired = [sym for sym, ts in self._sent_signals.items() if ts < cutoff]
-        for sym in expired:
-            del self._sent_signals[sym]
-
-        # Hard limit
-        if len(self._sent_signals) > self.SENT_SIGNALS_MAX_SIZE:
-            sorted_items = sorted(self._sent_signals.items(), key=lambda x: x[1])
-            to_remove = len(sorted_items) - self.SENT_SIGNALS_MAX_SIZE
-            for sym, _ in sorted_items[:to_remove]:
-                del self._sent_signals[sym]
-
-    def _run(self):
-        """Ana dongu."""
-        while True:
-            # Streamlit session_state'den config oku
-            cfg = st.session_state.get("bot_config", {})
-            active = cfg.get("active", False)
-            token = cfg.get("token", "")
-            chat_id = cfg.get("chat_id", "")
-            interval = cfg.get("interval", 60)
-
-            if not (active and token and chat_id):
-                time.sleep(interval)
-                continue
-
-            df, err = fetch_bybit_tickers()
-
-            if err or df.empty:
-                time.sleep(interval)
-                continue
-
-            min_vol = cfg.get("min_volume", 10.0)
-            min_chg = cfg.get("min_change", 2.0)
-
-            matches = df[
-                (df["quoteVolume"] >= min_vol)
-                & (df["priceChangePercent"].abs() >= min_chg)
-            ]
-
-            now = time.time()
-
-            for _, row in matches.iterrows():
-                sym = str(row["symbol"])
-
-                last_sent = self._sent_signals.get(sym, 0)
-                if (now - last_sent) <= self.COOLDOWN_SECONDS:
-                    continue
-
-                safe_sym = escape_telegram_markdown(sym)
-                direction = "🟢 YUKARI" if row["priceChangePercent"] >= 0 else "🔴 ASAGI"
-                price = float(row["lastPrice"])
-                change = float(row["priceChangePercent"])
-                volume = float(row["quoteVolume"])
-                time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
-
-                msg = (
-                    "🚨 *KRIPTO SINYALI* " + direction + "\n\n"
-                    "🪙 *Sembol:* `#" + safe_sym + "`\n"
-                    "💵 *Fiyat:* `$" + f"{price:.4f}" + "`\n"
-                    "📊 *Degisim:* `%" + f"{change:.2f}" + "`\n"
-                    "💰 *Hacim:* `$" + f"{volume:.1f}M" + "`\n"
-                    "⏰ *Zaman:* `" + time_str + "`"
-                )
-
-                if send_telegram_message(token, chat_id, msg):
-                    self._sent_signals[sym] = now
-
-            self._cleanup_old_signals()
+        if not (cfg["active"] and cfg["token"] and cfg["chat_id"]):
             time.sleep(interval)
+            continue
+
+        df, err = fetch_bybit_tickers()
+
+        if err or df.empty:
+            time.sleep(interval)
+            continue
+
+        min_vol = cfg["min_volume"]
+        min_chg = cfg["min_change"]
+
+        matches = df[
+            (df["quoteVolume"] >= min_vol)
+            & (df["priceChangePercent"].abs() >= min_chg)
+        ]
+
+        now = time.time()
+
+        for _, row in matches.iterrows():
+            sym = str(row["symbol"])
+
+            last_sent = sent_signals.get(sym, 0)
+            if (now - last_sent) <= cooldown_seconds:
+                continue
+
+            safe_sym = escape_telegram_markdown(sym)
+            direction = "YUKARI" if row["priceChangePercent"] >= 0 else "ASAGI"
+            price = float(row["lastPrice"])
+            change = float(row["priceChangePercent"])
+            volume = float(row["quoteVolume"])
+            time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
+
+            msg = (
+                "🚨 *KRIPTO SINYALI* " + direction + "\n\n"
+                "🪙 *Sembol:* `#" + safe_sym + "`\n"
+                "💵 *Fiyat:* `$" + f"{price:.4f}" + "`\n"
+                "📊 *Degisim:* `%" + f"{change:.2f}" + "`\n"
+                "💰 *Hacim:* `$" + f"{volume:.1f}M" + "`\n"
+                "⏰ *Zaman:* `" + time_str + "`"
+            )
+
+            if send_telegram_message(cfg["token"], cfg["chat_id"], msg):
+                sent_signals[sym] = now
+
+        # Bellek temizligi (her 10 dongude bir)
+        cleanup_counter += 1
+        if cleanup_counter >= 10:
+            cutoff = now - cooldown_seconds
+            expired = [s for s, ts in sent_signals.items() if ts < cutoff]
+            for s in expired:
+                del sent_signals[s]
+            # Hard limit: 5000 kayit
+            if len(sent_signals) > 5000:
+                sorted_items = sorted(sent_signals.items(), key=lambda x: x[1])
+                to_remove = len(sorted_items) - 5000
+                for s, _ in sorted_items[:to_remove]:
+                    del sent_signals[s]
+            cleanup_counter = 0
+
+        time.sleep(interval)
+
+
+def start_worker_once():
+    """Worker thread'ini sadece bir kez baslatir."""
+    global _worker_started
+    with _worker_lock:
+        if not _worker_started:
+            t = Thread(target=telegram_worker, daemon=True, name="TelegramWorker")
+            t.start()
+            _worker_started = True
 
 
 # ───────────────────────────────────────────────
 # STREAMLIT UI
 # ───────────────────────────────────────────────
-def init_session_state():
-    """Session state degiskenlerini baslatir."""
-    defaults = {
-        "bot_config": {
-            "active": False,
-            "token": "",
-            "chat_id": "",
-            "min_volume": 10.0,
-            "min_change": 2.0,
-            "interval": 60,
-        },
-        "last_scan_time": None,
-    }
-    for key, val in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
-
-
-def render_sidebar():
-    """Sidebar'i render eder ve config sozlugunu dondurur."""
-    st.sidebar.header("⚙️ Bot & Filtre Ayarlari")
-
-    # Secrets'ten varsayilan degerler
-    default_token = ""
-    default_chat_id = ""
+def get_secret(key, default=""):
+    """Secrets'ten guvenli sekilde deger okur."""
     try:
-        default_token = st.secrets.get("TELEGRAM_BOT_TOKEN", "")
-        default_chat_id = st.secrets.get("TELEGRAM_CHAT_ID", "")
+        return st.secrets.get(key, default)
     except Exception:
-        pass
+        return default
 
-    # Onceki degerleri session_state'ten al
-    prev_cfg = st.session_state.get("bot_config", {})
 
-    token = st.sidebar.text_input(
-        "Telegram Bot Token",
-        value=prev_cfg.get("token") or default_token,
-        type="password",
-        key="input_token",
-    )
-    chat_id = st.sidebar.text_input(
-        "Telegram Kanal/Chat ID",
-        value=prev_cfg.get("chat_id") or default_chat_id,
-        key="input_chat_id",
-    )
+# Sidebar
+st.sidebar.header("⚙️ Bot & Filtre Ayarlari")
 
-    min_vol = st.sidebar.number_input(
-        "Minimum 24h Hacim (Milyon $)",
-        min_value=0.0,
-        value=float(prev_cfg.get("min_volume", 10.0)),
-        step=5.0,
-        key="input_min_vol",
-    )
+default_token = get_secret("TELEGRAM_BOT_TOKEN", "")
+default_chat_id = get_secret("TELEGRAM_CHAT_ID", "")
 
-    min_chg = st.sidebar.number_input(
-        "Minimum Degisim (%)",
-        min_value=0.0,
-        value=float(prev_cfg.get("min_change", 2.0)),
-        step=0.5,
-        key="input_min_chg",
-    )
+TELEGRAM_BOT_TOKEN = st.sidebar.text_input(
+    "Telegram Bot Token", value=default_token, type="password"
+)
+TELEGRAM_CHAT_ID = st.sidebar.text_input(
+    "Telegram Kanal/Chat ID", value=default_chat_id
+)
 
-    interval = st.sidebar.slider(
-        "Tarama Sikligi (Saniye)",
-        min_value=10,
-        max_value=300,
-        value=int(prev_cfg.get("interval", 60)),
-        step=10,
-        key="input_interval",
-    )
+min_volume_m = st.sidebar.number_input(
+    "Minimum 24h Hacim (Milyon $)", value=10, step=5
+)
+min_change_pct = st.sidebar.number_input(
+    "Minimum Degisim (%)", value=2.0, step=0.5
+)
+scan_interval = st.sidebar.slider(
+    "Tarama Sikligi (Saniye)", min_value=10, max_value=300, value=60
+)
 
-    bot_active = st.sidebar.checkbox(
-        "🤖 Telegram Bildirimlerini Aktif Et",
-        value=bool(prev_cfg.get("active", False)),
-        key="input_active",
-    )
+bot_active = st.sidebar.checkbox("🤖 Telegram Bildirimlerini Aktif Et")
 
-    return {
-        "active": bot_active,
-        "token": token.strip(),
-        "chat_id": chat_id.strip(),
-        "min_volume": float(min_vol),
-        "min_change": float(min_chg),
-        "interval": int(interval),
-    }
+# Global config'i guncelle
+with config_lock:
+    GLOBAL_CONFIG["active"] = bot_active
+    GLOBAL_CONFIG["token"] = TELEGRAM_BOT_TOKEN
+    GLOBAL_CONFIG["chat_id"] = TELEGRAM_CHAT_ID
+    GLOBAL_CONFIG["min_volume"] = float(min_volume_m)
+    GLOBAL_CONFIG["min_change"] = float(min_change_pct)
+    GLOBAL_CONFIG["interval"] = int(scan_interval)
+
+# Worker'i baslat (sadece bir kez)
+start_worker_once()
 
 
 # ───────────────────────────────────────────────
-# MAIN
+# DASHBOARD
 # ───────────────────────────────────────────────
-def main():
-    init_session_state()
+st.title("📊 Kripto Piyasasi Taramasi & Sinyal Paneli")
 
-    # Sidebar render et ve config'i session_state'e kaydet
-    cfg = render_sidebar()
-    st.session_state["bot_config"] = cfg
+col_b1, col_b2 = st.columns([1, 4])
+with col_b1:
+    if st.button("🔄 Verileri Simdi Yenile"):
+        st.cache_data.clear()
 
-    # Background worker'i baslat (idempotent)
-    worker = TelegramWorker()
-    worker.start()
 
-    # ── DASHBOARD ──
-    st.title("📊 Kripto Piyasasi Taramasi & Sinyal Paneli")
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_market_data_cached():
+    return fetch_bybit_tickers()
 
-    col_btn, col_info = st.columns([1, 4])
-    with col_btn:
-        if st.button("🔄 Verileri Simdi Yenile", use_container_width=True):
-            st.cache_data.clear()
-            st.session_state["last_scan_time"] = datetime.now(timezone.utc)
 
-    # Verileri cek
-    @st.cache_data(ttl=15, show_spinner="Veriler yukleniyor...")
-    def _cached_fetch():
-        return fetch_bybit_tickers()
+df, err_msg = fetch_market_data_cached()
 
-    df, err_msg = _cached_fetch()
+if err_msg:
+    st.error("❌ " + err_msg)
 
-    if err_msg:
-        st.error("❌ " + err_msg)
-        st.stop()
-
-    if df.empty:
-        st.warning("⚠️ API verisi alindi fakat islenecek USDT cifti bulunamadi.")
-        st.stop()
-
-    # Filtrele
-    filtered = df[
-        (df["quoteVolume"] >= cfg["min_volume"])
-        & (df["priceChangePercent"].abs() >= cfg["min_change"])
+if not df.empty:
+    filtered_df = df[
+        (df["quoteVolume"] >= min_volume_m)
+        & (df["priceChangePercent"].abs() >= min_change_pct)
     ].sort_values(by="priceChangePercent", ascending=False)
 
-    # Metrikler
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Taranan Sembol", len(df))
-    c2.metric("Filtreye Uyan", len(filtered))
-    c3.metric("Bot Durumu", "🟢 Aktif" if cfg["active"] else "🔴 Pasif")
-    last_scan = st.session_state.get("last_scan_time")
-    c4.metric(
-        "Son Tarama",
-        last_scan.strftime("%H:%M:%S") if last_scan else "—",
-    )
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Taranan Sembol Sayisi", len(df))
+    col2.metric("Filtreye Uyan Semboller", len(filtered_df))
+    col3.metric("Bot Durumu", "Aktif" if bot_active else "Pasif")
 
-    st.divider()
-
-    # Tablo
     st.subheader("🎯 Filtreye Uyan Varliklar")
-
-    if not filtered.empty:
-        st.dataframe(
-            filtered,
-            column_config={
-                "symbol": st.column_config.TextColumn("Sembol", width="small"),
-                "lastPrice": st.column_config.NumberColumn(
-                    "Fiyat ($)", format="$%.4f", width="medium"
-                ),
-                "priceChangePercent": st.column_config.NumberColumn(
-                    "24h Degisim (%)",
-                    format="%.2f%%",
-                    width="medium",
-                ),
-                "quoteVolume": st.column_config.NumberColumn(
-                    "24h Hacim (M$)", format="$%.2fM", width="medium"
-                ),
-            },
-            use_container_width=True,
-            hide_index=True,
+    st.dataframe(
+        filtered_df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]],
+        column_config={
+            "symbol": "Sembol",
+            "lastPrice": st.column_config.NumberColumn(
+                "Fiyat ($)", format="$%.4f"
+            ),
+            "priceChangePercent": st.column_config.NumberColumn(
+                "24h Degisim (%)", format="%.2f%%"
+            ),
+            "quoteVolume": st.column_config.NumberColumn(
+                "24h Hacim (M$)", format="$%.2fM"
+            ),
+        },
+        use_container_width=True,
+    )
+else:
+    if not err_msg:
+        st.warning(
+            "⚠️ API verisi alindi fakat belirlenen filtre kriterlerine uyan coin bulunamadi."
         )
-    else:
-        st.info(
-            "ℹ️ Belirlenen filtre kriterlerine uyan coin bulunamadi. "
-            "Filtre degerlerini dusurmeyi deneyin."
-        )
-
-
-if __name__ == "__main__":
-    main()
