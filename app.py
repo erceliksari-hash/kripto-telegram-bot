@@ -3,7 +3,6 @@ from threading import Thread, Lock
 import pandas as pd
 import requests
 import streamlit as st
-import ccxt
 
 st.set_page_config(
     page_title="Crypto Scanner & Telegram Bot", layout="wide"
@@ -77,82 +76,41 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- KESİNTİSİZ VERİ ÇEKME (CCXT + FALLBACKS) ---
-def _raw_fetch_bybit_data():
-    last_error = ""
-
-    # Yöntem 1: CCXT Kütüphanesi ile Vadeli (Linear) Tickers
-    try:
-        exchange = ccxt.bybit({
-            'enableRateLimit': True,
-            'options': {
-                'defaultType': 'swap',
-            },
-            'headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
-            }
-        })
-        tickers = exchange.fetch_tickers()
-        
-        parsed_data = []
-        for symbol, data in tickers.items():
-            if symbol.endswith("/USDT:USDT") or symbol.endswith("/USDT"):
-                raw_symbol = symbol.split(":")[0].replace("/", "")
-                last_price = data.get('last')
-                percentage = data.get('percentage')
-                quote_volume = data.get('quoteVolume')
-
-                if last_price is not None and percentage is not None and quote_volume is not None:
-                    parsed_data.append({
-                        "symbol": raw_symbol,
-                        "lastPrice": float(last_price),
-                        "priceChangePercent": float(percentage),
-                        "quoteVolume": float(quote_volume) / 1_000_000
-                    })
-        
-        if parsed_data:
-            df = pd.DataFrame(parsed_data)
-            return df, None
-    except Exception as e:
-        last_error = f"CCXT Hatası: {str(e)}"
-
-    # Yöntem 2: Direct CDN REST Endpoint Bypass (Alternative Domain)
-    endpoints = [
-        "https://api.bybit.com/v5/market/tickers?category=linear",
-        "https://api.bytick.com/v5/market/tickers?category=linear"
-    ]
+# --- KESİNTİSİZ VERİ ÇEKME (BINANCE FUTURES) ---
+def _raw_fetch_binance_data():
+    # Binance Futures (USDT-M) Ticker Endpoint
+    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     }
 
-    for url in endpoints:
-        try:
-            r = requests.get(url, headers=headers, timeout=8)
-            if r.status_code == 200:
-                res_data = r.json()
-                ticker_list = res_data.get("result", {}).get("list", [])
-                if ticker_list:
-                    df = pd.DataFrame(ticker_list)
-                    df = df[df["symbol"].str.endswith("USDT")].copy()
-                    df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
-                    df["priceChangePercent"] = pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
-                    df["quoteVolume"] = pd.to_numeric(df["turnover24h"], errors="coerce") / 1_000_000
-                    df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
-                    return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]], None
-        except Exception as e:
-            last_error = f"REST Hatası: {str(e)}"
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            df = pd.DataFrame(data)
+            
+            # Sadece USDT çiftlerini al
+            df = df[df["symbol"].str.endswith("USDT")].copy()
 
-    return pd.DataFrame(), f"Tüm bağlantı yöntemleri engellendi. Detay: {last_error}"
+            # Sayısal sütun dönüşümleri
+            df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
+            df["priceChangePercent"] = pd.to_numeric(df["priceChangePercent"], errors="coerce")
+            df["quoteVolume"] = pd.to_numeric(df["quoteVolume"], errors="coerce") / 1_000_000
+
+            df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
+            return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]], None
+        else:
+            return pd.DataFrame(), f"Binance HTTP Hatası: Kod {r.status_code}"
+    except Exception as e:
+        return pd.DataFrame(), f"Binance Bağlantı Hatası: {str(e)}"
 
 
 # Streamlit önbellekleme
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_market_data_cached():
-    return _raw_fetch_bybit_data()
+    return _raw_fetch_binance_data()
 
 
 # --- DASHBOARD ---
@@ -213,7 +171,7 @@ def telegram_worker():
             cfg = GLOBAL_CONFIG.copy()
 
         if cfg["active"] and cfg["token"] and cfg["chat_id"]:
-            data, _ = _raw_fetch_bybit_data()
+            data, _ = _raw_fetch_binance_data()
 
             if not data.empty:
                 matches = data[
