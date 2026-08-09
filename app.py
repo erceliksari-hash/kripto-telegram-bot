@@ -436,4 +436,75 @@ if selected_chart_symbol:
         
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True, 
-            vertical_spacing=0.08, subplot_titles=(f"{selected_chart_symbol} Fiyat Grafik & EMA50",
+            vertical_spacing=0.08, subplot_titles=(f"{selected_chart_symbol} Fiyat Grafik & EMA50", "RSI (14) Göstergesi"),
+            row_heights=[0.7, 0.3]
+        )
+
+        fig.add_trace(go.Candlestick(
+            x=df_chart['datetime'],
+            open=df_chart['open'], high=df_chart['high'],
+            low=df_chart['low'], close=df_chart['close'],
+            name="Fiyat"
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=df_chart['datetime'], y=df_chart['ema50'],
+            mode='lines', name='EMA 50', line=dict(color='orange', width=1.5)
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=df_chart['datetime'], y=df_chart['rsi'],
+            mode='lines', name='RSI', line=dict(color='purple', width=1.5)
+        ), row=1, col=1)
+
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+        fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+
+# --- BÖLÜM 4: TELEGRAM BİLDİRİMLERİ ---
+st.sidebar.markdown("---")
+if st.sidebar.button("📤 Telegram Raporunu Şimdi Gönder"):
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    msg = f"🛡️ *AKILLI KRİPTO FIRSAT RAPORU*\n⏱️ *Saat:* `{now_str}`\n"
+    msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n"
+
+    quntry_msg = build_clean_telegram_report(df_quntry_raw, "\n🍟 *QUNTRY FRY SİNYALLERİ:*", min_score=min_score_telegram)
+    genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top_coin_limit} SİNYALLERİ:*", min_score=min_score_telegram)
+
+    total_msg = msg + quntry_msg + genel_msg
+
+    if quntry_msg or genel_msg:
+        success, err = send_telegram_message(total_msg)
+        if success:
+            st.sidebar.success("✅ Yüksek kaliteli sinyal raporu Telegram'a gönderildi!")
+        else:
+            st.sidebar.error(f"❌ Hata: {err}")
+    else:
+        st.sidebar.info(f"ℹ️ Şu an {min_score_telegram}+ puanı geçen kalitede sinyal bulunamadı.")
+
+# ==========================================
+# 7. OTOMATİK ZAMANLAYICI (30 DAKİKADA BİR)
+# ==========================================
+if enable_auto_telegram:
+    if "last_bot_run" not in st.session_state:
+        st.session_state["last_bot_run"] = 0
+
+    CURRENT_TIME = time.time()
+    THIRTY_MINUTES = 1800
+
+    if (CURRENT_TIME - st.session_state["last_bot_run"]) > THIRTY_MINUTES:
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        msg = f"🛡️ *AKILLI KRİPTO OTOMATİK RAPOR*\n⏱️ *Saat:* `{now_str}`\n"
+        msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n"
+
+        quntry_msg = build_clean_telegram_report(df_quntry_raw, "\n🍟 *QUNTRY FRY SİNYALLERİ:*", min_score=min_score_telegram)
+        genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top_coin_limit} SİNYALLERİ:*", min_score=min_score_telegram)
+        
+        total_msg = msg + quntry_msg + genel_msg
+
+        if quntry_msg or genel_msg:
+            send_telegram_message(total_msg)
+        
+        st.session_state["last_bot_run"] = CURRENT_TIME
