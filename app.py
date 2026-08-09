@@ -63,6 +63,18 @@ user_risk_pct = st.sidebar.number_input("İşlem Başı Risk (%)", value=2.0, st
 
 st.sidebar.markdown("---")
 
+# Dinamik Tarama Slider Ayarı
+st.sidebar.subheader("🔥 Dinamik Genel Piyasa Taraması")
+top_coin_limit = st.sidebar.slider(
+    "Borsada Taranacak En Hacimli Coin Sayısı", 
+    min_value=20, 
+    max_value=100, 
+    value=50, 
+    step=10
+)
+
+st.sidebar.markdown("---")
+
 enable_auto_telegram = st.sidebar.checkbox(
     "30 Dk'da Bir Otomatik Telegram Sinyali Gönder", value=True
 )
@@ -73,26 +85,12 @@ only_signals_telegram = st.sidebar.checkbox(
 
 st.sidebar.markdown("---")
 
-st.sidebar.subheader("📝 Genel Taranacak Semboller")
-default_symbols = (
-    "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, "
-    "ADAUSDT, DOTUSDT, SHIBUSDT, MATICUSDT, LTCUSDT, TRONUSDT, UNIUSDT, ATOMUSDT, "
-    "APTUSDT, ARBUSDT, OPUSDT, INJUSDT, SUIUSDT, FETUSDT, RENDERUSDT, PEPEUSDT, "
-    "FLOKIUSDT, BONKUSDT, TIAUSDT, SEIUSDT, FILUSDT, ICPUSDT"
-)
-symbol_input = st.sidebar.text_area(
-    "Semboller (Virgülle ayırın)", value=default_symbols, height=100
-)
-custom_symbol_list = [
-    s.strip().upper()
-    for s in symbol_input.replace("\n", ",").split(",")
-    if s.strip()
-]
+# Quntry Fry Özel Takip Listesi (İçerideki sabit değişkeniniz)
+st.sidebar.subheader("🍟 Quntry Fry Özel Takip Listesi")
 
-st.sidebar.markdown("---")
+# 📌 İLERİDE BURADAKİ COIN LİSTESİNİ KOD İÇİNDEN KOLAYCA DEĞİŞTİREBİLİRSİNİZ:
+quntry_default = "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, ADAUSDT, DOTUSDT, SHIBUSDT, MATICUSDT, LTCUSDT, TRONUSDT, UNIUSDT, ATOMUSDT, APTUSDT, ARBUSDT, OPUSDT, INJUSDT, SUIUSDT, FETUSDT, RENDERUSDT, PEPEUSDT, FLOKIUSDT, BONKUSDT, TIAUSDT, SEIUSDT, FILUSDT, ICPUSDT"
 
-st.sidebar.subheader("🍟 Quntry Fry Özel Listesi")
-quntry_default = "BICOUSDT, RECALLUSDT, ZDTUSDT, BEATUSDT"
 quntry_input = st.sidebar.text_area(
     "Quntry Fry Coinleri (Virgülle ayırın)", value=quntry_default, height=60
 )
@@ -118,7 +116,29 @@ rsi_min, rsi_max = st.sidebar.slider("RSI (14) Aralığı", 0, 100, (0, 100))
 # 4. AKILLI ANALİZ MOTORU & YARDIMCI FİLTRELER
 # ==========================================
 
-# 1. AKILLI FİLTRE: BTC Piyasa Trend Kontrolü
+@st.cache_data(ttl=300) # 5 dakikada bir hacim listesini günceller
+def get_top_volume_symbols(limit=50):
+    """Binance borsasından 24h hacmi en yüksek USDT çiftlerini otomatik çeker."""
+    try:
+        ex = EXCHANGES["Binance"]
+        tickers = ex.fetch_tickers()
+        usdt_pairs = []
+        for symbol, ticker in tickers.items():
+            if symbol.endswith("/USDT") and ticker.get("quoteVolume") is not None:
+                # Kaldıraçlı/Leveraged (UP/DOWN/BEAR/BULL) coinleri ele
+                if not any(x in symbol for x in ["UP/", "DOWN/", "BEAR/", "BULL/"]):
+                    usdt_pairs.append({
+                        "symbol": symbol.replace("/", ""),
+                        "volume": ticker["quoteVolume"]
+                    })
+        # Hacme göre büyükten küçüğe sırala
+        df_sorted = pd.DataFrame(usdt_pairs).sort_values(by="volume", ascending=False)
+        return df_sorted.head(limit)["symbol"].tolist()
+    except Exception as e:
+        # Hata durumunda varsayılan yedek popüler coinler
+        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "NEARUSDT", "LINKUSDT", "DOGEUSDT", "XRPUSDT"]
+
+
 def get_btc_market_status():
     """BTC 4 saatlik EMA50 üzerinde mi kontrol eder."""
     for ex_instance in EXCHANGES.values():
@@ -136,7 +156,7 @@ def get_btc_market_status():
             continue
     return "UNKNOWN", 0.0
 
-# 2. AKILLI FİLTRE: 4 Saatlik Ana Trend Kontrolü
+
 def check_4h_trend(ex_instance, symbol):
     """Coin'in 4h ana trendinin pozitif olup olmadığını kontrol eder."""
     try:
@@ -147,7 +167,8 @@ def check_4h_trend(ex_instance, symbol):
             return df["close"].iloc[-1] > ema50
     except Exception:
         pass
-    return True # Veri çekilemezse varsayılan engelleme yapmaz
+    return True
+
 
 def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc_status="BULLISH"):
     raw_sym = symbol.replace("/", "").replace("-", "")
@@ -179,23 +200,18 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
             prev = df.iloc[-2]
             price = float(latest["close"])
 
-            # En yakın Direnç (Son 20 mumun en yükseği)
             recent_resistance = float(df["high"].tail(20).max())
 
-            # 24s Değişim ve Hacim Hesabı
             first_price = float(df.iloc[0]["close"])
             change_24h = ((price - first_price) / first_price) * 100
             vol_24h_m = (df["volume"].sum() * price) / 1_000_000
 
-            # Kırılım & Hacim Onayı Kontrolü
             is_volume_surge = latest["volume"] > (latest["vol_sma"] * 1.3)
             is_bullish_1h = price > latest["ema50"]
             is_macd_cross = (prev["macd"] < prev["macd_signal"]) and (latest["macd"] > latest["macd_signal"])
 
-            # 4 Saatlik Ana Trend Onayı
             is_bullish_4h = check_4h_trend(ex_instance, formatted_symbol)
 
-            # Sinyal Sınıflandırma
             if is_bullish_1h and is_macd_cross and is_volume_surge and (latest["rsi"] < 68):
                 if btc_status == "BEARISH":
                     signal = "⚠️ RISK (BTC DÜŞÜŞTE)"
@@ -216,24 +232,19 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
                 signal = "NÖTR"
                 comment = "⚪ Yatay Piyasa"
 
-            # 3. AKILLI FİLTRE: Stop Loss, Risk/Ödül & Pozisyon Büyüklüğü Hesaplama
             atr_val = float(latest["atr"])
             stop_loss = round(price - (atr_val * 1.5), 4)
             target_tp1 = round(price + (atr_val * 2.0), 4)
 
-            # Risk / Ödül Hesaplama
             risk_per_coin = price - stop_loss
             reward_per_coin = target_tp1 - price
             rr_ratio = round(reward_per_coin / risk_per_coin, 2) if risk_per_coin > 0 else 0
 
-            # Dirence Uzaklık
             dist_to_resistance_pct = round(((recent_resistance - price) / price) * 100, 2)
 
-            # Önerilen Pozisyon Büyüklüğü ($) = (Bakiye * Risk%) / SL Mesafesi (%)
             sl_pct = (risk_per_coin / price)
             max_risk_amount = user_balance * (user_risk_pct / 100)
             rec_position_size = round(max_risk_amount / sl_pct, 2) if sl_pct > 0 else 0
-            # Kasadan fazla pozisyon açılmasını engelle
             rec_position_size = min(rec_position_size, user_balance)
 
             return {
@@ -261,7 +272,7 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
 
 def analyze_symbol_list_fast(symbols, timeframe="1h", btc_status="BULLISH"):
     results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=12) as executor:
         futures = [executor.submit(fetch_symbol_from_all_exchanges, sym, timeframe, False, btc_status) for sym in symbols]
         for future in as_completed(futures):
             res = future.result()
@@ -290,7 +301,10 @@ def send_telegram_message(message):
 # ==========================================
 st.title("🛡️ Akıllı Kripto Analiz & Risk Yönetim Paneli")
 
-# BTC Trendini Başta Kontrol Et
+# 1. Dinamik Liste Çekimi (Slider'dan alınan limit adedi kadar çekilir)
+dynamic_genel_symbols = get_top_volume_symbols(limit=top_coin_limit)
+
+# BTC Trendini Kontrol Et
 btc_status, btc_price = get_btc_market_status()
 
 # BTC Piyasa Durum Kartı
@@ -301,10 +315,10 @@ elif btc_status == "BEARISH":
 else:
     st.warning("⚠️ BTC piyasa trendi alınamadı, genel tarama yapılıyor.")
 
-# Paralel Tarama
+# Paralel Tarama Başlat
 start_time = time.time()
 df_quntry_raw = analyze_symbol_list_fast(quntry_symbol_list, timeframe=quntry_timeframe, btc_status=btc_status)
-df_genel_raw = analyze_symbol_list_fast(custom_symbol_list, timeframe="1h", btc_status=btc_status)
+df_genel_raw = analyze_symbol_list_fast(dynamic_genel_symbols, timeframe="1h", btc_status=btc_status)
 scan_duration = round(time.time() - start_time, 2)
 
 def apply_filters(df):
@@ -324,7 +338,7 @@ df_genel = apply_filters(df_genel_raw)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Tarama Süresi", f"{scan_duration} sn")
 c2.metric("Quntry Fry Bulunan", len(df_quntry_raw))
-c3.metric("Genel Bulunan Coin", len(df_genel_raw))
+c3.metric("Dinamik Taranan Coin", f"{len(df_genel_raw)} / {top_coin_limit}")
 c4.metric("Kasa / İşlem Riski", f"${user_balance} / %{user_risk_pct}")
 
 # --- BÖLÜM 1: QUNTRY FRY LİSTESİ ---
@@ -337,7 +351,7 @@ else:
 st.markdown("---")
 
 # --- BÖLÜM 2: GENEL PİYASA ANALİZİ ---
-st.markdown("### 🎯 Genel Piyasa Risk & Hedef Analizi")
+st.markdown(f"### 🎯 Piyasadaki En Hacimli Top {top_coin_limit} Coin Analizi (Otomatik)")
 if not df_genel.empty:
     st.dataframe(df_genel, use_container_width=True)
 else:
@@ -347,7 +361,7 @@ st.markdown("---")
 
 # --- BÖLÜM 3: İNTERAKTİF GRAFİK EKRANI ---
 st.markdown("### 📈 Canlı Grafik İnceleme Paneli")
-all_available_symbols = list(set(custom_symbol_list + quntry_symbol_list))
+all_available_symbols = list(set(dynamic_genel_symbols + quntry_symbol_list))
 selected_chart_symbol = st.selectbox("Grafiğini Görmek İstediğiniz Coini Seçin:", all_available_symbols)
 
 if selected_chart_symbol:
@@ -408,7 +422,7 @@ if st.sidebar.button("📤 Telegram Raporunu Şimdi Gönder"):
     msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n\n"
 
     quntry_msg = build_telegram_report(df_quntry_raw, "🍟 *QUNTRY FRY SİNYALLERİ:*")
-    genel_msg = build_telegram_report(df_genel_raw, "🎯 *GENEL PİYASA SİNYALLERİ:*")
+    genel_msg = build_telegram_report(df_genel_raw, f"🎯 *DİNAMİK TOP {top_coin_limit} PİYASA SİNYALLERİ:*")
 
     total_msg = msg + quntry_msg + "\n" + genel_msg
 
@@ -437,7 +451,7 @@ if enable_auto_telegram:
         msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n\n"
 
         quntry_msg = build_telegram_report(df_quntry_raw, "🍟 *QUNTRY FRY LİSTESİ:*")
-        genel_msg = build_telegram_report(df_genel_raw, "🎯 *GENEL PİYASA LİSTESİ:*")
+        genel_msg = build_telegram_report(df_genel_raw, f"🎯 *DİNAMİK TOP {top_coin_limit} PİYASA LİSTESİ:*")
         
         total_msg = msg + quntry_msg + "\n" + genel_msg
 
