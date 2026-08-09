@@ -5,7 +5,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Crypto Scanner & Advanced Signal Bot", layout="wide"
+    page_title="Crypto Scanner & Dual-List Auto-Telegram", layout="wide"
 )
 
 # Secrets veya Varsayılan Tanımlamalar
@@ -21,7 +21,12 @@ def get_secret(section, key, default=""):
 DEFAULT_TOKEN = get_secret("telegram", "bot_token", "8736398780:AAFWxPurStPIts--TYjHZccPpjVNnIk02Sg")
 DEFAULT_CHAT_ID = get_secret("telegram", "chat_id", "-1004436877206")
 
-# Thread'ler arası güvenli veri paylaşımı
+QUANTFURY_DEFAULT_LIST = (
+    "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, XRPUSDT, LINKUSDT, ADAUSDT, DOTUSDT, "
+    "NEARUSDT, LTCUSDT, DOGEUSDT, SHIBUSDT, MATICUSDT, ATOMUSDT, APTUSDT, "
+    "SUIUSDT, ARBUSDT, OPUSDT, INJUSDT, TIAUSDT, FETUSDT, RENDERUSDT, PEPEUSDT"
+)
+
 GLOBAL_CONFIG = {
     "active": False,
     "token": DEFAULT_TOKEN,
@@ -32,6 +37,7 @@ GLOBAL_CONFIG = {
     "rsi_max": 62,
     "use_ema_filter": True,
     "interval": 60,
+    "watchlist": [s.strip() for s in QUANTFURY_DEFAULT_LIST.split(",") if s.strip()]
 }
 config_lock = Lock()
 
@@ -48,7 +54,6 @@ def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
 def calculate_atr(df, period=14):
-    """ATR (Average True Range) volatilite hesaplaması"""
     high_low = df["h"] - df["l"]
     high_close = (df["h"] - df["c"].shift()).abs()
     low_close = (df["l"] - df["c"].shift()).abs()
@@ -57,7 +62,6 @@ def calculate_atr(df, period=14):
     return atr.iloc[-1]
 
 def calculate_pivot_points(df):
-    """Klasik Pivot Points (P, R1, R2, S1, S2) Hesaplaması"""
     high = df["h"].iloc[-1]
     low = df["l"].iloc[-1]
     close = df["c"].iloc[-1]
@@ -71,14 +75,26 @@ def calculate_pivot_points(df):
     return round(pivot, 4), round(r1, 4), round(r2, 4), round(s1, 4), round(s2, 4)
 
 
-# --- SIDEBAR & FILTERS ---
+# --- SIDEBAR AYARLARI ---
 st.sidebar.header("⚙️ Bot & Genel Ayarlar")
 
 TELEGRAM_BOT_TOKEN = st.sidebar.text_input("Telegram Bot Token", value=DEFAULT_TOKEN, type="password")
 TELEGRAM_CHAT_ID = st.sidebar.text_input("Telegram Kanal/Chat ID", value=DEFAULT_CHAT_ID)
 
 scan_interval = st.sidebar.slider("Tarama Sıklığı (Saniye)", min_value=10, max_value=300, value=60)
-bot_active = st.sidebar.checkbox("🤖 Telegram Bildirimlerini Aktif Et")
+bot_active = st.sidebar.checkbox("🤖 Otomatik Telegram Bildirimlerini Aktif Et", value=True)
+
+st.sidebar.markdown("---")
+st.sidebar.header("🎯 Quantfury / Özel İzleme Listesi")
+
+watchlist_raw = st.sidebar.text_area(
+    "Quantfury Coin Listesi (Virgülle Ayırın)",
+    value=QUANTFURY_DEFAULT_LIST,
+    height=120,
+    help="Quantfury sekmende görünmesini istediğin coinler."
+)
+
+parsed_watchlist = [s.strip().upper() for s in watchlist_raw.split(",") if s.strip()]
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔍 Temel & Hacim Filtreleri")
@@ -102,10 +118,11 @@ with config_lock:
     GLOBAL_CONFIG["rsi_max"] = rsi_range[1]
     GLOBAL_CONFIG["use_ema_filter"] = use_ema_filter
     GLOBAL_CONFIG["interval"] = int(scan_interval)
+    GLOBAL_CONFIG["watchlist"] = parsed_watchlist
 
 
-# --- TELEGRAM MESAJ GÖNDERİMİ ---
-def send_telegram_signal(token, chat_id, row):
+# --- TELEGRAM GÖNDERİMİ ---
+def send_telegram_signal(token, chat_id, row, is_quantfury=False):
     if not token or not chat_id:
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -125,32 +142,25 @@ def send_telegram_signal(token, chat_id, row):
     r2 = row.get('r2', 0)
     s1 = row.get('s1', 0)
     
-    # Direnç Kontrol Uyarısı
-    resistance_warn = ""
-    if price >= r1 * 0.99 and price <= r1 * 1.01:
-        resistance_warn = "\n⚠️ *UYARI:* Fiyat R1 Direncine Çok Yakın!"
-    elif price >= r2 * 0.99:
-        resistance_warn = "\n⚠️ *UYARI:* Fiyat R2 Direnç Bölgesinde!"
+    tag_header = "⚡ *QUANTFURY SİNYALİ*" if is_quantfury else "🌐 *GENEL PİYASA SİNYALİ (OKX)*"
 
     message = (
-        f"🚨 *YÜKSEK OLASILIKLI KRİPTO SİNYALİ* 🚨\n"
+        f"🚨 {tag_header} 🚨\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *Sembol:* #{symbol}\n"
         f"💵 *Giriş (Entry):* `${price:.4f}`\n"
         f"📈 *24h Değişim:* `%{change:+.2f}`\n"
         f"💰 *24h Hacim:* `${volume:.2f}M`\n"
-        f"📊 *RSI (14):* `{rsi:.1f}` | *Trend:* `{ema_status}`{resistance_warn}\n"
+        f"📊 *RSI (14):* `{rsi:.1f}` | *Trend:* `{ema_status}`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🎯 *ATR RİSK & HEDEF SEVİYELERİ*\n"
         f"🛑 *Stop-Loss (SL):* `${sl:.4f}` (`-%{((price-sl)/price)*100:.2f}`)\n"
-        f"🎯 *Hedef 1 (TP1 - 1:1.5):* `${tp1:.4f}` (`+%{((tp1-price)/price)*100:.2f}`)\n"
-        f"🚀 *Hedef 2 (TP2 - 1:2.0):* `${tp2:.4f}` (`+%{((tp2-price)/price)*100:.2f}`)\n"
+        f"🎯 *Hedef 1 (TP1):* `${tp1:.4f}` (`+%{((tp1-price)/price)*100:.2f}`)\n"
+        f"🚀 *Hedef 2 (TP2):* `${tp2:.4f}` (`+%{((tp2-price)/price)*100:.2f}`)\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"📐 *OTOMATİK PIVOT DESTEK / DİRENÇ*\n"
-        f"🔴 *Direnç 2 (R2):* `${r2:.4f}`\n"
-        f"🔴 *Direnç 1 (R1):* `${r1:.4f}`\n"
-        f"⚪ *Pivot (P):* `${pivot:.4f}`\n"
-        f"🟢 *Destek 1 (S1):* `${s1:.4f}`\n"
+        f"📐 *PIVOT DESTEK / DİRENÇ*\n"
+        f"🔴 *Direnç 1 (R1):* `${r1:.4f}` | *R2:* `${r2:.4f}`\n"
+        f"⚪ *Pivot (P):* `${pivot:.4f}` | *S1:* `${s1:.4f}`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"⏰ *Zaman:* `{time.strftime('%H:%M:%S')}`\n"
     )
@@ -181,7 +191,7 @@ def send_telegram_signal(token, chat_id, row):
         print(f"Telegram Hatası: {e}")
 
 
-# --- OKX TEKNİK, ATR & PIVOT VERİ ÇEKME ---
+# --- VERİ ÇEKME FONKSİYONLARI ---
 def fetch_kline_indicators(inst_id, current_price):
     url = f"https://www.okx.com/api/v5/market/candles?instId={inst_id}&bar=1H&limit=60"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -201,7 +211,6 @@ def fetch_kline_indicators(inst_id, current_price):
                 ema50_series = calculate_ema(df_kline["c"], 50)
                 atr_val = calculate_atr(df_kline, 14)
                 
-                # Pivot Points Hesaplama
                 pivot, r1, r2, s1, s2 = calculate_pivot_points(df_kline)
                 
                 latest_rsi = rsi_series.iloc[-1]
@@ -279,10 +288,10 @@ def fetch_market_data_cached():
     return _raw_fetch_okx_data()
 
 
-# --- DASHBOARD ---
-st.title("📊 Kripto Piyasası Taraması & Advanced Pivot/ATR Analiz Paneli")
+# --- ANA EKRAN VE SEKMELER ---
+st.title("📊 Crypto Scanner & Dual-List Analiz Paneli")
 
-col_b1, col_b2 = st.columns([1, 4])
+col_b1, _ = st.columns([1, 4])
 with col_b1:
     if st.button("🔄 Verileri Şimdi Yenile"):
         st.cache_data.clear()
@@ -298,15 +307,9 @@ if not df_raw.empty:
         (df_raw["priceChangePercent"] >= min_change_pct)
     ].copy()
 
-    rsi_list = []
-    ema_status_list = []
-    is_bullish_list = []
-    sl_list = []
-    tp1_list = []
-    tp2_list = []
-    pivot_list = []
-    r1_list = []
-    r2_list = []
+    rsi_list, ema_status_list, is_bullish_list = [], [], []
+    sl_list, tp1_list, tp2_list = [], [], []
+    pivot_list, r1_list, r2_list = [], [], []
 
     for _, row in base_filtered.iterrows():
         rsi_val, ema_stat, is_bull, sl, tp1, tp2, p, r1, r2, s1, s2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
@@ -339,33 +342,52 @@ if not df_raw.empty:
 
     final_df = final_df.sort_values(by="priceChangePercent", ascending=False)
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Taranan Toplam Sembol", len(df_raw))
-    col2.metric("Filtreye Uyan Semboller", len(final_df))
-    col3.metric("Bot Durumu", "Aktif" if bot_active else "Pasif")
+    df_quantfury = final_df[final_df["symbol"].isin(parsed_watchlist)].copy()
+    df_all_market = final_df.copy()
 
-    st.subheader("🎯 Risk/Ödül & Pivot Seviyeli Varlıklar")
-    st.dataframe(
-        final_df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume", "rsi", "sl_price", "tp1_price", "r1", "r2"]],
-        column_config={
-            "symbol": "Sembol",
-            "lastPrice": st.column_config.NumberColumn("Giriş ($)", format="$%.4f"),
-            "priceChangePercent": st.column_config.NumberColumn("24h Değişim (%)", format="%.2f%%"),
-            "quoteVolume": st.column_config.NumberColumn("24h Hacim (M$)", format="$%.2fM"),
-            "rsi": st.column_config.NumberColumn("RSI (14)", format="%.1f"),
-            "sl_price": st.column_config.NumberColumn("🛑 Stop-Loss", format="$%.4f"),
-            "tp1_price": st.column_config.NumberColumn("🎯 TP1 (1:1.5)", format="$%.4f"),
-            "r1": st.column_config.NumberColumn("🔴 Direnç 1 (R1)", format="$%.4f"),
-            "r2": st.column_config.NumberColumn("🔴 Direnç 2 (R2)", format="$%.4f"),
-        },
-        use_container_width=True,
-    )
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Piyasadaki Toplam Sembol", len(df_raw))
+    col2.metric("Quantfury Uygun Fırsat", len(df_quantfury))
+    col3.metric("Tüm Piyasa Uygun Fırsat", len(df_all_market))
+    col4.metric("Bot Durumu", "Aktif" if bot_active else "Pasif")
+
+    st.markdown("---")
+
+    tab1, tab2 = st.tabs(["⚡ Quantfury / İzleme Listesi Fırsatları", "🌐 Tüm OKX Piyasası Fırsatları"])
+
+    def display_crypto_table(df_to_show):
+        if df_to_show.empty:
+            st.info("Kriterlere uyan hiçbir kripto varlık bulunamadı.")
+        else:
+            st.dataframe(
+                df_to_show[["symbol", "lastPrice", "priceChangePercent", "quoteVolume", "rsi", "sl_price", "tp1_price", "r1", "r2"]],
+                column_config={
+                    "symbol": "Sembol",
+                    "lastPrice": st.column_config.NumberColumn("Giriş ($)", format="$%.4f"),
+                    "priceChangePercent": st.column_config.NumberColumn("24h Değişim (%)", format="%.2f%%"),
+                    "quoteVolume": st.column_config.NumberColumn("24h Hacim (M$)", format="$%.2fM"),
+                    "rsi": st.column_config.NumberColumn("RSI (14)", format="%.1f"),
+                    "sl_price": st.column_config.NumberColumn("🛑 Stop-Loss", format="$%.4f"),
+                    "tp1_price": st.column_config.NumberColumn("🎯 TP1 (1:1.5)", format="$%.4f"),
+                    "r1": st.column_config.NumberColumn("🔴 Direnç 1 (R1)", format="$%.4f"),
+                    "r2": st.column_config.NumberColumn("🔴 Direnç 2 (R2)", format="$%.4f"),
+                },
+                use_container_width=True,
+            )
+
+    with tab1:
+        st.subheader("📌 Quantfury'de Mevcut Olan Fırsatlar")
+        display_crypto_table(df_quantfury)
+
+    with tab2:
+        st.subheader("🌍 OKX Üzerindeki Tüm Uygun Fırsatlar")
+        display_crypto_table(df_all_market)
 
 
-# --- BACKGROUND WORKER ---
+# --- ARKA PLAN BOT WORKER (TÜM FIRSATLARI OTOMATİK BİLDİRİR) ---
 def telegram_worker():
     sent_signals = {}
-    cooldown_seconds = 1800
+    cooldown_seconds = 1800  # Aynı coin için 30 dakika bildirim engeli
 
     while True:
         with config_lock:
@@ -383,7 +405,9 @@ def telegram_worker():
                 current_time = time.time()
                 for _, row in matches.iterrows():
                     sym = row["symbol"]
-                    
+                    is_qf = sym in cfg["watchlist"]
+
+                    # Hem Quantfury hem OKX üzerindeki tüm kriteri sağlayan coinleri otomatik gönderir
                     if sym not in sent_signals or (current_time - sent_signals[sym]) > cooldown_seconds:
                         rsi_val, ema_stat, is_bull, sl, tp1, tp2, p, r1, r2, s1, s2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
                         
@@ -403,7 +427,8 @@ def telegram_worker():
                             row_dict["s1"] = s1
                             row_dict["s2"] = s2
                             
-                            send_telegram_signal(cfg["token"], cfg["chat_id"], row_dict)
+                            # Bildirim mesajına Quantfury etiketi veya Genel Piyasa etiketi ekler
+                            send_telegram_signal(cfg["token"], cfg["chat_id"], row_dict, is_quantfury=is_qf)
                             sent_signals[sym] = current_time
 
         time.sleep(cfg.get("interval", 60))
