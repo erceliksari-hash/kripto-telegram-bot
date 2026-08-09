@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 
 # ==========================================
 # PAGE CONFIG
@@ -16,7 +15,6 @@ st.set_page_config(
 # TELEGRAM BİLDİRİM FONKSİYONU
 # ==========================================
 def send_telegram_message(bot_token, chat_id, message):
-    """Telegram API üzerinden mesaj gönderir."""
     if not bot_token or not chat_id:
         return False
     
@@ -33,21 +31,20 @@ def send_telegram_message(bot_token, chat_id, message):
         st.error(f"Telegram mesaj hatası: {e}")
         return False
 
-# Session State Initializations (Tekrarlayan bildirimleri önlemek için)
+# Session State Initializations
 if "sent_alerts" not in st.session_state:
     st.session_state.sent_alerts = set()
 
 # ==========================================
-# SIDEBAR / GENEL AYARLAR
+# SIDEBAR / FILTRELER & AYARLAR
 # ==========================================
 st.sidebar.title("⚙️ Bot & Genel Ayarlar")
 
 telegram_token = st.sidebar.text_input("Telegram Bot Token", type="password")
 telegram_chat_id = st.sidebar.text_input("Telegram Kanal/Chat ID")
 refresh_interval = st.sidebar.slider("Tarama Sıklığı (Saniye)", min_value=10, max_value=300, value=60)
-auto_telegram = st.sidebar.checkbox("Ötotomatik Telegram Bildirimlerini Aktif Et", value=True)
+auto_telegram = st.sidebar.checkbox("Otomatik Telegram Bildirimlerini Aktif Et", value=True)
 
-# Oturum hafızasını sıfırlama butonu
 if st.sidebar.button("🔄 Bildirim Geçmişini Sıfırla"):
     st.session_state.sent_alerts.clear()
     st.sidebar.success("Bildirim geçmişi temizlendi!")
@@ -61,25 +58,38 @@ quantfury_raw = st.sidebar.text_area(
 quantfury_list = [c.strip().upper() for c in quantfury_raw.split(",") if c.strip()]
 
 st.sidebar.markdown("---")
-st.sidebar.title("🔍 Temel & Hacim Filtreleri")
+st.sidebar.title("🔍 Temel & Gösterge Filtreleri")
+
+# TEKNİK GÖSTERGE VE TEMEL FİLTRELER
 min_volume = st.sidebar.number_input("Minimum 24h Hacim (Milyon $)", value=10.0)
+max_rsi = st.sidebar.slider("Maksimum RSI (14)", min_value=10, max_value=100, value=60)
+min_change = st.sidebar.number_input("Minimum 24s Değişim (%)", value=0.0)
 
 # ==========================================
-# SAHTE/ÖRNEK VERİ MOTORU (Sizin veri çekme fonksiyonunuz buraya gelir)
+# VERİ VERİ ÇEKME & TEKNİK FİLTRE HESAPLAMA
 # ==========================================
-def fetch_okx_data():
+def fetch_and_filter_okx_data(min_vol, rsi_limit, min_chg):
     """
-    Burada OKX veya CCXT kütüphanesi ile piyasadan veri çektiğinizi varsayıyoruz.
-    Demo amaçlı kilit ekran görüntünüzdeki fırsatları döndürür.
+    OKX piyasa verilerini çeker ve sol panellerdeki TEKNİK GÖSTERGE filtrelerine göre süzer.
     """
-    # Gerçek projenizde burası OKX API'sine istek atıp teknik analiz yapar.
-    all_opportunities = [
+    # Örnek/Ham piyasa verileri (Gerçek projede OKX API / CCXT verisi)
+    raw_market_data = [
         {"symbol": "CAPUSDT", "price": 0.0383, "change": 3.68, "volume_m": 711.70, "rsi": 58.8, "stop_loss": 0.0362, "tp1": 0.0414, "r1": 0.0389, "r2": 0.0394},
         {"symbol": "IRYSUSDT", "price": 0.0163, "change": 2.58, "volume_m": 52.74, "rsi": 46.5, "stop_loss": 0.0160, "tp1": 0.0168, "r1": 0.0164, "r2": 0.0165},
         {"symbol": "0GUSDT", "price": 0.1541, "change": 2.32, "volume_m": 20.75, "rsi": 44.3, "stop_loss": 0.1504, "tp1": 0.1596, "r1": 0.1554, "r2": 0.1565},
+        {"symbol": "BTCUSDT", "price": 65000.0, "change": -1.2, "volume_m": 1200.0, "rsi": 65.0, "stop_loss": 64000.0, "tp1": 67000.0, "r1": 66000.0, "r2": 66500.0}, # RSI > 60 elenecek
     ]
+    
     total_symbols = 423
-    return all_opportunities, total_symbols
+    filtered_opportunities = []
+
+    # 🎯 TEKNİK FİLTRE HESAPLAMASI
+    for coin in raw_market_data:
+        # Filtre Şartları: Hacim >= Min Hacim AND RSI <= RSI Limit AND Değişim >= Min Değişim
+        if (coin["volume_m"] >= min_vol) and (coin["rsi"] <= rsi_limit) and (coin["change"] >= min_chg):
+            filtered_opportunities.append(coin)
+
+    return filtered_opportunities, total_symbols
 
 # ==========================================
 # ANA SAYFA VE ARAYÜZ
@@ -89,9 +99,10 @@ st.title("📊 Crypto Scanner & Quantfury Analiz Paneli")
 if st.button("🔄 Verileri Şimdi Yenile"):
     st.rerun()
 
-all_opportunities, total_symbols = fetch_okx_data()
+# Teknik Gösterge Filtrelerini Veri Motoruna Gönderiyoruz
+all_opportunities, total_symbols = fetch_and_filter_okx_data(min_volume, max_rsi, min_change)
 
-# Quantfury listesi eşleşmelerini filtrele
+# Quantfury listesi eşleşmeleri
 quantfury_opportunities = [item for item in all_opportunities if item["symbol"] in quantfury_list]
 
 # Metrik Kartları
@@ -102,20 +113,17 @@ col3.metric("Tüm Piyasa Uygun Fırsat", len(all_opportunities))
 col4.metric("Bot Durumu", "Aktif" if auto_telegram else "Pasif")
 
 # ==========================================
-# TELEGRAM BİLDİRİM MANTIĞI (GÜNCELLENEN KISIM)
+# TELEGRAM BİLDİRİM MANTIĞI
 # ==========================================
 if auto_telegram and telegram_token and telegram_chat_id:
-    # 🟢 DEĞİŞİKLİK: Artık sadece quantfury_opportunities değil, all_opportunities döngüye alınıyor.
+    # Filtreden geçen TÜM fırsatları döngüye alıyoruz
     for coin in all_opportunities:
         symbol = coin["symbol"]
         
-        # Eğer bu coin daha önce bildirildiyse tekrar atma
         if symbol not in st.session_state.sent_alerts:
-            # Rozet/Etiket belirleme
             is_qf = symbol in quantfury_list
             tag = "⚡ [Quantfury Listesi]" if is_qf else "🌐 [Genel OKX Fırsatı]"
             
-            # Telegram Mesaj Taslağı
             msg = (
                 f"🚨 **Yeni Fırsat Sinyali!** {tag}\n\n"
                 f"📌 **Sembol:** `{symbol}`\n"
@@ -126,9 +134,7 @@ if auto_telegram and telegram_token and telegram_chat_id:
                 f"🎯 **Target (TP1):** `${coin['tp1']}`\n"
             )
             
-            # Mesajı Gönder
             sent_success = send_telegram_message(telegram_token, telegram_chat_id, msg)
-            
             if sent_success:
                 st.session_state.sent_alerts.add(symbol)
 
@@ -142,7 +148,7 @@ with tab1:
         df_qf = pd.DataFrame(quantfury_opportunities)
         st.dataframe(df_qf, use_container_width=True)
     else:
-        st.info("Quantfury izleme listenizde şu an uygun fırsat bulunamadı.")
+        st.info("Quantfury izleme listenizde filtrelere uyan fırsat bulunamadı.")
 
 with tab2:
     st.subheader("🌍 OKX Üzerindeki Tüm Uygun Fırsatlar")
@@ -150,4 +156,4 @@ with tab2:
         df_all = pd.DataFrame(all_opportunities)
         st.dataframe(df_all, use_container_width=True)
     else:
-        st.info("Piyasada kriterlere uygun fırsat bulunamadı.")
+        st.info("Piyasada belirlenen teknik filtrelere uygun fırsat bulunamadı.")
