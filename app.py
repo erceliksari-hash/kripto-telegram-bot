@@ -116,7 +116,7 @@ rsi_min, rsi_max = st.sidebar.slider("RSI (14) Aralığı", 0, 100, (0, 100))
 
 
 # ==========================================
-# 4. AKILLI ANALİZ MOTORU & SKORLAMA (GELİŞMİŞ)
+# 4. AKILLI ANALİZ MOTORU, SKORLAMA & KAZANÇ HESABI
 # ==========================================
 
 @st.cache_data(ttl=300)
@@ -251,7 +251,7 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
 
             comment = " | ".join(score_reasons) if score_reasons else "Zayıf göstergeler"
 
-            # --- KADEMELİ KAR AL (TP1, TP2, TP3) & STOP LOSS HESABI ---
+            # --- HEDEF (TP), STOP LOSS VE POZİSYON HESABI ---
             atr_val = float(latest["atr"])
             stop_loss = round(price - (atr_val * 1.5), 4)
             target_tp1 = round(price + (atr_val * 1.2), 4)  # Hızlı Kar Al (Break-even)
@@ -267,6 +267,17 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
             rec_position_size = round(max_risk_amount / sl_pct, 2) if sl_pct > 0 else 0
             rec_position_size = min(rec_position_size, user_balance)
 
+            # --- KADEMELİ KÂR VE RİSK HESAPLAMALARI ($) ---
+            # TP1: Pozisyonun %50'si satılır
+            tp1_gain = round((rec_position_size * 0.50) * ((target_tp1 - price) / price), 2)
+            # TP2: Pozisyonun %30'u satılır
+            tp2_gain = round((rec_position_size * 0.30) * ((target_tp2 - price) / price), 2)
+            # TP3: Kalan %20'si satılır
+            tp3_gain = round((rec_position_size * 0.20) * ((target_tp3 - price) / price), 2)
+            
+            total_potential_gain = round(tp1_gain + tp2_gain + tp3_gain, 2)
+            max_potential_loss = round(rec_position_size * sl_pct, 2)
+
             return {
                 "Sembol": symbol,
                 "Kaynak Borsa": ex_name,
@@ -279,6 +290,11 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
                 "Hedef (TP1)": target_tp1,
                 "Hedef (TP2)": target_tp2,
                 "Hedef (TP3)": target_tp3,
+                "TP1 Kar ($)": tp1_gain,
+                "TP2 Kar ($)": tp2_gain,
+                "TP3 Kar ($)": tp3_gain,
+                "Toplam Potansiyel Kar ($)": total_potential_gain,
+                "Maks Risk ($)": max_potential_loss,
                 "R:R Oranı": rr_ratio,
                 "Önerilen Poz ($)": rec_position_size,
                 "Sinyal": signal,
@@ -304,7 +320,7 @@ def analyze_symbol_list_fast(symbols, timeframe="1h", btc_status="BULLISH"):
 
 
 # ==========================================
-# 5. TELEGRAM BİLDİRİM FONKSİYONU (YENİ SADE FORMAT)
+# 5. TELEGRAM BİLDİRİM FONKSİYONU
 # ==========================================
 def send_telegram_message(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -319,11 +335,10 @@ def send_telegram_message(message):
 
 
 def build_clean_telegram_report(df_raw, title, min_score=75):
-    """Kafa karıştırmayan, sade ve aksiyon odaklı Telegram mesaj kartı oluşturur."""
+    """Kademeli kâr tutarlarını ($) içeren net ve sade Telegram mesaj kartı oluşturur."""
     if df_raw.empty:
         return ""
     
-    # Skor filtresine uyan yüksek kaliteli sinyalleri seç
     filtered_df = df_raw[df_raw["Güven Skoru"] >= min_score].sort_values(by="Güven Skoru", ascending=False)
     
     if filtered_df.empty:
@@ -334,12 +349,12 @@ def build_clean_telegram_report(df_raw, title, min_score=75):
         msg += f"───────────────────────\n"
         msg += f"🎯 *{row['Sinyal']}* (%{row['Güven Skoru']} Güven Skoru)\n"
         msg += f"🪙 *Coin:* `{row['Sembol']}` ({row['Kaynak Borsa']})\n"
-        msg += f"🟢 *Giriş Fiyatı:* `${row['Fiyat ($)']}`\n"
-        msg += f"🛑 *Stop Loss:* `${row['Stop Loss']}`\n"
-        msg += f"🎯 *Hedef 1 (TP1):* `${row['Hedef (TP1)']}` _(Hızlı Kar/Break-even)_\n"
-        msg += f"🎯 *Hedef 2 (TP2):* `${row['Hedef (TP2)']}` _(Ana Hedef)_\n"
-        msg += f"🚀 *Hedef 3 (TP3):* `${row['Hedef (TP3)']}` _(Direnç / Boğa Target)_\n"
-        msg += f"💰 *Önerilen Poz Büyüklüğü:* `${row['Önerilen Poz ($)']}`\n"
+        msg += f"🟢 *Giriş Fiyatı:* `${row['Fiyat ($)']}` | *Önerilen Poz:* `${row['Önerilen Poz ($)']}`\n"
+        msg += f"🛑 *Stop Loss:* `${row['Stop Loss']}` _(Maks Risk: -${row['Maks Risk ($)']})_\n"
+        msg += f"🎯 *TP1 (`${row['Hedef (TP1)']}`):* Poz %50 Kapat ➡️ *+${row['TP1 Kar ($)']} Kâr* _(Stop Girişe Çekilir)_\n"
+        msg += f"🎯 *TP2 (`${row['Hedef (TP2)']}`):* Poz %30 Kapat ➡️ *+${row['TP2 Kar ($)']} Kâr*\n"
+        msg += f"🚀 *TP3 (`${row['Hedef (TP3)']}`):* Poz %20 Kapat ➡️ *+${row['TP3 Kar ($)']} Kâr*\n"
+        msg += f"💰 *Tüm Hedefler Gelirse Toplam Kâr:* *+${row['Toplam Potansiyel Kar ($)']}*\n"
         msg += f"💡 *Özet Neden:* _{row['Yorum']}_\n"
     
     return msg
@@ -483,4 +498,11 @@ if enable_auto_telegram:
         msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n"
 
         quntry_msg = build_clean_telegram_report(df_quntry_raw, "\n🍟 *QUNTRY FRY SİNYALLERİ:*", min_score=min_score_telegram)
-        genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top
+        genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top_coin_limit} SİNYALLERİ:*", min_score=min_score_telegram)
+        
+        total_msg = msg + quntry_msg + genel_msg
+
+        if quntry_msg or genel_msg:
+            send_telegram_message(total_msg)
+        
+        st.session_state["last_bot_run"] = CURRENT_TIME
