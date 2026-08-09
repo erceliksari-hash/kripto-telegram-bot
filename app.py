@@ -5,7 +5,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Crypto Scanner & Dual-List Auto-Telegram", layout="wide"
+    page_title="Crypto Scanner & Position Calculator", layout="wide"
 )
 
 # Secrets veya Varsayılan Tanımlamalar
@@ -73,6 +73,55 @@ def calculate_pivot_points(df):
     s2 = pivot - (high - low)
     
     return round(pivot, 4), round(r1, 4), round(r2, 4), round(s1, 4), round(s2, 4)
+
+
+# --- QUANTFURY POZİSYON VE KALDIRAÇ HESAPLAYICI ---
+def calculate_quantfury_position(account_balance, risk_percentage, entry_price, stop_loss_price, take_profit_price=None, leverage=1.0):
+    if entry_price <= 0 or stop_loss_price <= 0:
+        raise ValueError("Giriş ve Stop-Loss fiyatları 0'dan büyük olmalıdır.")
+    
+    is_long = entry_price > stop_loss_price
+    direction = "LONG 🟢" if is_long else "SHORT 🔴"
+    
+    risk_amount_usd = account_balance * (risk_percentage / 100.0)
+    
+    if is_long:
+        price_risk_pct = (entry_price - stop_loss_price) / entry_price
+    else:
+        price_risk_pct = (stop_loss_price - entry_price) / entry_price
+
+    if price_risk_pct <= 0:
+        raise ValueError("Long işlemde Stop-Loss girişten küçük, Short işlemde büyük olmalıdır.")
+
+    max_position_size_usd = risk_amount_usd / price_risk_pct
+    max_allowed_by_leverage = account_balance * leverage
+    actual_position_size_usd = min(max_position_size_usd, max_allowed_by_leverage)
+    
+    units = actual_position_size_usd / entry_price
+    required_margin = actual_position_size_usd / leverage
+    
+    pnl_tp_usd = None
+    risk_reward_ratio = None
+    if take_profit_price and take_profit_price > 0:
+        if is_long:
+            tp_pct = (take_profit_price - entry_price) / entry_price
+        else:
+            tp_pct = (entry_price - take_profit_price) / entry_price
+            
+        pnl_tp_usd = actual_position_size_usd * tp_pct
+        risk_reward_ratio = pnl_tp_usd / risk_amount_usd if risk_amount_usd > 0 else 0.0
+
+    return {
+        "direction": direction,
+        "risk_amount_usd": round(risk_amount_usd, 2),
+        "position_size_usd": round(actual_position_size_usd, 2),
+        "units": round(units, 4),
+        "required_margin": round(required_margin, 2),
+        "effective_leverage": round(actual_position_size_usd / account_balance, 2),
+        "price_risk_pct": round(price_risk_pct * 100, 2),
+        "tp_pnl_usd": round(pnl_tp_usd, 2) if pnl_tp_usd is not None else None,
+        "risk_reward_ratio": round(risk_reward_ratio, 2) if risk_reward_ratio is not None else None
+    }
 
 
 # --- SIDEBAR AYARLARI ---
@@ -289,7 +338,7 @@ def fetch_market_data_cached():
 
 
 # --- ANA EKRAN VE SEKMELER ---
-st.title("📊 Crypto Scanner & Dual-List Analiz Paneli")
+st.title("📊 Crypto Scanner & Quantfury Analiz Paneli")
 
 col_b1, _ = st.columns([1, 4])
 with col_b1:
@@ -353,7 +402,11 @@ if not df_raw.empty:
 
     st.markdown("---")
 
-    tab1, tab2 = st.tabs(["⚡ Quantfury / İzleme Listesi Fırsatları", "🌐 Tüm OKX Piyasası Fırsatları"])
+    tab1, tab2, tab3 = st.tabs([
+        "⚡ Quantfury / İzleme Listesi Fırsatları", 
+        "🌐 Tüm OKX Piyasası Fırsatları", 
+        "🧮 Quantfury Kaldıraç Hesaplayıcı"
+    ])
 
     def display_crypto_table(df_to_show):
         if df_to_show.empty:
@@ -383,11 +436,58 @@ if not df_raw.empty:
         st.subheader("🌍 OKX Üzerindeki Tüm Uygun Fırsatlar")
         display_crypto_table(df_all_market)
 
+    with tab3:
+        st.subheader("🧮 Quantfury Risk & Kaldıraç Hesaplayıcı")
+        st.caption("Girmek istediğiniz pozisyon için risk bakiyenizi aşmayacak ideal pozisyon büyüklüğünü hesaplayın.")
 
-# --- ARKA PLAN BOT WORKER (TÜM FIRSATLARI OTOMATİK BİLDİRİR) ---
+        col_calc1, col_calc2 = st.columns(2)
+
+        with col_calc1:
+            acc_balance = st.number_input("Toplam Hesap Bakiyesi ($)", min_value=10.0, value=1000.0, step=50.0)
+            risk_pct = st.slider("İşlem Başı Riske Edilecek Bakiye (%)", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
+            selected_lev = st.selectbox("Seçilen Kaldıraç Oranı", options=[1, 2, 3, 5, 10, 20], index=4)
+
+        with col_calc2:
+            entry_p = st.number_input("Giriş Fiyatı ($)", min_value=0.0001, value=50000.0, step=10.0, format="%.4f")
+            sl_p = st.number_input("Stop-Loss Fiyatı ($)", min_value=0.0001, value=49000.0, step=10.0, format="%.4f")
+            tp_p = st.number_input("Take-Profit / Kar Al Fiyatı ($)", min_value=0.0, value=52000.0, step=10.0, format="%.4f")
+
+        if st.button("🧮 Pozisyon Büyüklüğünü Hesapla", type="primary"):
+            try:
+                calc_res = calculate_quantfury_position(
+                    account_balance=acc_balance,
+                    risk_percentage=risk_pct,
+                    entry_price=entry_p,
+                    stop_loss_price=sl_p,
+                    take_profit_price=tp_p,
+                    leverage=selected_lev
+                )
+
+                st.markdown("---")
+                st.markdown(f"### **İşlem Yönü:** {calc_res['direction']}")
+
+                m_col1, m_col2, m_col3 = st.columns(3)
+                m_col1.metric("Önerilen Pozisyon Büyüklüğü", f"${calc_res['position_size_usd']:,}")
+                m_col2.metric("Maksimum Risk Tutarı", f"${calc_res['risk_amount_usd']:,}")
+                m_col3.metric("Gerekli Teminat (Margin)", f"${calc_res['required_margin']:,}")
+
+                st.markdown(f"""
+                - **Pozisyon Adedi:** `{calc_res['units']}` Lot / Birim
+                - **Stop-Loss Uzaklığı:** `%{calc_res['price_risk_pct']}`
+                - **Etkili Kaldıraç Kullanımı:** `{calc_res['effective_leverage']}x`
+                """)
+
+                if calc_res['tp_pnl_usd'] is not None:
+                    st.success(f"🎯 **Hedef Kar (TP):** ${calc_res['tp_pnl_usd']:,} (Risk/Ödül Oranı = **1 : {calc_res['risk_reward_ratio']}**)")
+
+            except Exception as ex:
+                st.error(f"Hesaplama Hatası: {str(ex)}")
+
+
+# --- ARKA PLAN BOT WORKER ---
 def telegram_worker():
     sent_signals = {}
-    cooldown_seconds = 1800  # Aynı coin için 30 dakika bildirim engeli
+    cooldown_seconds = 1800
 
     while True:
         with config_lock:
@@ -407,7 +507,6 @@ def telegram_worker():
                     sym = row["symbol"]
                     is_qf = sym in cfg["watchlist"]
 
-                    # Hem Quantfury hem OKX üzerindeki tüm kriteri sağlayan coinleri otomatik gönderir
                     if sym not in sent_signals or (current_time - sent_signals[sym]) > cooldown_seconds:
                         rsi_val, ema_stat, is_bull, sl, tp1, tp2, p, r1, r2, s1, s2 = fetch_kline_indicators(row["instId"], row["lastPrice"])
                         
@@ -427,7 +526,6 @@ def telegram_worker():
                             row_dict["s1"] = s1
                             row_dict["s2"] = s2
                             
-                            # Bildirim mesajına Quantfury etiketi veya Genel Piyasa etiketi ekler
                             send_telegram_signal(cfg["token"], cfg["chat_id"], row_dict, is_quantfury=is_qf)
                             sent_signals[sym] = current_time
 
