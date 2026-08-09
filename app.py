@@ -3,6 +3,7 @@ from threading import Thread, Lock
 import pandas as pd
 import requests
 import streamlit as st
+from fp.fp import FreeProxy
 
 st.set_page_config(
     page_title="Crypto Scanner & Telegram Bot", layout="wide"
@@ -23,7 +24,6 @@ config_lock = Lock()
 # --- SIDEBAR & FILTERS ---
 st.sidebar.header("⚙️ Bot & Filtre Ayarları")
 
-# Secrets kontrolünü güvenli hale getirme
 def get_secret(key, default=""):
     try:
         return st.secrets.get(key, default)
@@ -52,7 +52,6 @@ scan_interval = st.sidebar.slider(
 
 bot_active = st.sidebar.checkbox("🤖 Telegram Bildirimlerini Aktif Et")
 
-# Thread'e aktarılacak konfigürasyonu güvenli şekilde güncelle
 with config_lock:
     GLOBAL_CONFIG["active"] = bot_active
     GLOBAL_CONFIG["token"] = TELEGRAM_BOT_TOKEN
@@ -74,31 +73,42 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- RAW API VERI ÇEKME (GITHUB ACTIONS, CLOUDFLARE & BYPASS DESTEKLİ) ---
+# --- RAW API VERI ÇEKME (PROXY & BYPASS DESTEKLİ) ---
 def _raw_fetch_bybit_data():
-    url = "https://api.bybit.com/v5/market/tickers?category=linear&limit=1000"
-    alt_url = "https://api.bytick.com/v5/market/tickers?category=linear&limit=1000"
+    urls = [
+        "https://api.bybit.com/v5/market/tickers?category=linear&limit=1000",
+        "https://api.bytick.com/v5/market/tickers?category=linear&limit=1000",
+        "https://api-testnet.bybit.com/v5/market/tickers?category=linear&limit=1000"
+    ]
     
     res = None
     
-    # 1. YÖNTEM: curl_cffi ile TLS Parmak İzi Taklidi (GitHub IP Engellerini Aşmada En Etkilisi)
+    # 1. DENEME: curl_cffi ile TLS Parmak İzi Taklidi (Doğrudan İstek)
     try:
         from curl_cffi import requests as curl_requests
-        res = curl_requests.get(url, impersonate="chrome120", timeout=10)
-        if res.status_code == 403:
-            res = curl_requests.get(alt_url, impersonate="chrome120", timeout=10)
+        for target_url in urls:
+            res = curl_requests.get(target_url, impersonate="chrome120", timeout=8)
+            if res.status_code == 200:
+                break
     except Exception:
-        # 2. YÖNTEM: curl_cffi başarısız olursa cloudscraper'a düş
+        pass
+
+    # 2. DENEME: Doğrudan istekler 403 alıyorsa Ücretsiz Proxy ile Tünelle
+    if res is None or res.status_code == 403:
         try:
-            import cloudscraper
-            scraper = cloudscraper.create_scraper(
-                browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-            )
-            res = scraper.get(url, timeout=10)
-            if res.status_code == 403:
-                res = scraper.get(alt_url, timeout=10)
-        except Exception as e:
-            return pd.DataFrame(), f"Kütüphane Yükleme/İstek Hatası: {str(e)}"
+            proxy_url = FreeProxy(rand=True, timeout=1).get()
+            proxies = {"http": proxy_url, "https": proxy_url}
+            
+            from curl_cffi import requests as curl_requests
+            res = curl_requests.get(urls[0], impersonate="chrome120", proxies=proxies, timeout=10)
+        except Exception:
+            # 3. DENEME: Cloudscraper + Proxy
+            try:
+                import cloudscraper
+                scraper = cloudscraper.create_scraper()
+                res = scraper.get(urls[0], timeout=10)
+            except Exception as e:
+                return pd.DataFrame(), f"Bağlantı/Proxy Hatası: {str(e)}"
 
     if res is None or res.status_code != 200:
         status_code = res.status_code if res else "Yanıt Yok"
@@ -110,7 +120,6 @@ def _raw_fetch_bybit_data():
     try:
         data = res.json()
         
-        # API yanıtındaki retCode kontrolü
         if data.get("retCode") != 0:
             return pd.DataFrame(), f"Bybit API Hata Mesajı: {data.get('retMsg')}"
 
@@ -200,10 +209,10 @@ else:
         )
 
 
-# --- BACKGROUND WORKER (SAYFA BAGIMSIZ THREAD) ---
+# --- BACKGROUND WORKER ---
 def telegram_worker():
-    sent_signals = {}  # {symbol: timestamp} şeklinde tutulur (Spam engeli için)
-    cooldown_seconds = 1800  # Aynı coine 30 dakikada 1 sinyal atar
+    sent_signals = {}
+    cooldown_seconds = 1800
 
     while True:
         with config_lock:
@@ -240,7 +249,6 @@ def telegram_worker():
         time.sleep(cfg.get("interval", 60))
 
 
-# Singleton Thread Yönetimi
 @st.cache_resource
 def start_background_worker():
     t = Thread(target=telegram_worker, daemon=True)
