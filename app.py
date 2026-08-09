@@ -90,12 +90,14 @@ min_score_telegram = st.sidebar.slider(
 
 st.sidebar.markdown("---")
 
-# Quntry Fry Özel Takip Listesi
+# Quntry Fry Özel Takip Listesi (Sözdizimi hatası düzeltildi)
 st.sidebar.subheader("🍟 Quntry Fry Özel Takip Listesi")
-quntry_default = "BICOUSDT, RECALLUSDT, ZDTUSDT, BEATUSDT,
-BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, 
-ADAUSDT, DOTUSDT, SHIBUSDT, MATICUSDT, LTCUSDT, TRONUSDT, UNIUSDT, ATOMUSDT, APTUSDT, ARBUSDT, 
-OPUSDT, INJUSDT, SUIUSDT, FETUSDT, RENDERUSDT, PEPEUSDT, FLOKIUSDT, BONKUSDT, TIAUSDT, SEIUSDT, FILUSDT, ICPUSDT"
+quntry_default = (
+    "BICOUSDT, RECALLUSDT, ZDTUSDT, BEATUSDT, "
+    "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, "
+    "ADAUSDT, DOTUSDT, SHIBUSDT, MATICUSDT, LTCUSDT, TRONUSDT, UNIUSDT, ATOMUSDT, APTUSDT, ARBUSDT, "
+    "OPUSDT, INJUSDT, SUIUSDT, FETUSDT, RENDERUSDT, PEPEUSDT, FLOKIUSDT, BONKUSDT, TIAUSDT, SEIUSDT, FILUSDT, ICPUSDT"
+)
 
 quntry_input = st.sidebar.text_area(
     "Quntry Fry Coinleri (Virgülle ayırın)", value=quntry_default, height=60
@@ -271,11 +273,8 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
             rec_position_size = min(rec_position_size, user_balance)
 
             # --- KADEMELİ KÂR VE RİSK HESAPLAMALARI ($) ---
-            # TP1: Pozisyonun %50'si satılır
             tp1_gain = round((rec_position_size * 0.50) * ((target_tp1 - price) / price), 2)
-            # TP2: Pozisyonun %30'u satılır
             tp2_gain = round((rec_position_size * 0.30) * ((target_tp2 - price) / price), 2)
-            # TP3: Kalan %20'si satılır
             tp3_gain = round((rec_position_size * 0.20) * ((target_tp3 - price) / price), 2)
             
             total_potential_gain = round(tp1_gain + tp2_gain + tp3_gain, 2)
@@ -339,7 +338,7 @@ def send_telegram_message(message):
 
 def build_clean_telegram_report(df_raw, title, min_score=75):
     """Kademeli kâr tutarlarını ($) içeren net ve sade Telegram mesaj kartı oluşturur."""
-    if df_raw.empty:
+    if df_raw.empty or "Güven Skoru" not in df_raw.columns:
         return ""
     
     filtered_df = df_raw[df_raw["Güven Skoru"] >= min_score].sort_values(by="Güven Skoru", ascending=False)
@@ -388,7 +387,7 @@ df_genel_raw = analyze_symbol_list_fast(dynamic_genel_symbols, timeframe="1h", b
 scan_duration = round(time.time() - start_time, 2)
 
 def apply_filters(df):
-    if df.empty:
+    if df.empty or "24h Hacim (M$)" not in df.columns:
         return df
     return df[
         (df["24h Hacim (M$)"] >= min_volume)
@@ -437,75 +436,4 @@ if selected_chart_symbol:
         
         fig = make_subplots(
             rows=2, cols=1, shared_xaxes=True, 
-            vertical_spacing=0.08, subplot_titles=(f"{selected_chart_symbol} Fiyat Grafik & EMA50", "RSI (14) Göstergesi"),
-            row_heights=[0.7, 0.3]
-        )
-
-        fig.add_trace(go.Candlestick(
-            x=df_chart['datetime'],
-            open=df_chart['open'], high=df_chart['high'],
-            low=df_chart['low'], close=df_chart['close'],
-            name="Fiyat"
-        ), row=1, col=1)
-
-        fig.add_trace(go.Scatter(
-            x=df_chart['datetime'], y=df_chart['ema50'],
-            mode='lines', name='EMA 50', line=dict(color='orange', width=1.5)
-        ), row=1, col=1)
-
-        fig.add_trace(go.Scatter(
-            x=df_chart['datetime'], y=df_chart['rsi'],
-            mode='lines', name='RSI', line=dict(color='purple', width=1.5)
-        ), row=1, col=1)
-
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-
-        fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
-
-# --- BÖLÜM 4: TELEGRAM BİLDİRİMLERİ ---
-st.sidebar.markdown("---")
-if st.sidebar.button("📤 Telegram Raporunu Şimdi Gönder"):
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"🛡️ *AKILLI KRİPTO FIRSAT RAPORU*\n⏱️ *Saat:* `{now_str}`\n"
-    msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n"
-
-    quntry_msg = build_clean_telegram_report(df_quntry_raw, "\n🍟 *QUNTRY FRY SİNYALLERİ:*", min_score=min_score_telegram)
-    genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top_coin_limit} SİNYALLERİ:*", min_score=min_score_telegram)
-
-    total_msg = msg + quntry_msg + genel_msg
-
-    if quntry_msg or genel_msg:
-        success, err = send_telegram_message(total_msg)
-        if success:
-            st.sidebar.success("✅ Yüksek kaliteli sinyal raporu Telegram'a gönderildi!")
-        else:
-            st.sidebar.error(f"❌ Hata: {err}")
-    else:
-        st.sidebar.info(f"ℹ️ Şu an {min_score_telegram}+ puanı geçen kalitede sinyal bulunamadı.")
-
-# ==========================================
-# 7. OTOMATİK ZAMANLAYICI (30 DAKİKADA BİR)
-# ==========================================
-if enable_auto_telegram:
-    if "last_bot_run" not in st.session_state:
-        st.session_state["last_bot_run"] = 0
-
-    CURRENT_TIME = time.time()
-    THIRTY_MINUTES = 1800
-
-    if (CURRENT_TIME - st.session_state["last_bot_run"]) > THIRTY_MINUTES:
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"🛡️ *AKILLI KRİPTO OTOMATİK RAPOR*\n⏱️ *Saat:* `{now_str}`\n"
-        msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n"
-
-        quntry_msg = build_clean_telegram_report(df_quntry_raw, "\n🍟 *QUNTRY FRY SİNYALLERİ:*", min_score=min_score_telegram)
-        genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top_coin_limit} SİNYALLERİ:*", min_score=min_score_telegram)
-        
-        total_msg = msg + quntry_msg + genel_msg
-
-        if quntry_msg or genel_msg:
-            send_telegram_message(total_msg)
-        
-        st.session_state["last_bot_run"] = CURRENT_TIME
+            vertical_spacing=0.08, subplot_titles=(f"{selected_chart_symbol} Fiyat Grafik & EMA50",
