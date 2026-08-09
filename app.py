@@ -3,17 +3,29 @@ from threading import Thread, Lock
 import pandas as pd
 import requests
 import streamlit as st
-from fp.fp import FreeProxy
 
 st.set_page_config(
     page_title="Crypto Scanner & Telegram Bot", layout="wide"
 )
 
-# Thread'ler arası güvenli veri paylaşımı için Global Konfigürasyon ve Kilit (Lock)
+# Secrets veya Varsayılan Tanımlamalar
+def get_secret(section, key, default=""):
+    try:
+        return st.secrets[section][key]
+    except Exception:
+        try:
+            return st.secrets.get(key, default)
+        except Exception:
+            return default
+
+DEFAULT_TOKEN = get_secret("telegram", "bot_token", "8736398780:AAFWxPurStPIts--TYjHZccPpjVNnIk02Sg")
+DEFAULT_CHAT_ID = get_secret("telegram", "chat_id", "-1004436877206")
+
+# Thread'ler arası güvenli veri paylaşımı için Global Konfigürasyon
 GLOBAL_CONFIG = {
     "active": False,
-    "token": "",
-    "chat_id": "",
+    "token": DEFAULT_TOKEN,
+    "chat_id": DEFAULT_CHAT_ID,
     "min_volume": 10.0,
     "min_change": 2.0,
     "interval": 60,
@@ -24,20 +36,11 @@ config_lock = Lock()
 # --- SIDEBAR & FILTERS ---
 st.sidebar.header("⚙️ Bot & Filtre Ayarları")
 
-def get_secret(key, default=""):
-    try:
-        return st.secrets.get(key, default)
-    except Exception:
-        return default
-
-default_token = get_secret("TELEGRAM_BOT_TOKEN", "")
-default_chat_id = get_secret("TELEGRAM_CHAT_ID", "")
-
 TELEGRAM_BOT_TOKEN = st.sidebar.text_input(
-    "Telegram Bot Token", value=default_token, type="password"
+    "Telegram Bot Token", value=DEFAULT_TOKEN, type="password"
 )
 TELEGRAM_CHAT_ID = st.sidebar.text_input(
-    "Telegram Kanal/Chat ID", value=default_chat_id
+    "Telegram Kanal/Chat ID", value=DEFAULT_CHAT_ID
 )
 
 min_volume_m = st.sidebar.number_input(
@@ -73,86 +76,85 @@ def send_telegram_message(token, chat_id, message):
         print(f"Telegram Hatası: {e}")
 
 
-# --- RAW API VERI ÇEKME (PROXY & BYPASS DESTEKLİ) ---
+# --- KESİNTİSİZ VERİ ÇEKME FONKSİYONU ---
 def _raw_fetch_bybit_data():
-    urls = [
-        "https://api.bybit.com/v5/market/tickers?category=linear&limit=1000",
-        "https://api.bytick.com/v5/market/tickers?category=linear&limit=1000",
-        "https://api-testnet.bybit.com/v5/market/tickers?category=linear&limit=1000"
+    endpoints = [
+        "https://api.bybit.com/v5/market/tickers?category=linear",
+        "https://api.bytick.com/v5/market/tickers?category=linear",
+        "https://api-testnet.bybit.com/v5/market/tickers?category=linear"
     ]
     
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
     res = None
-    
-    # 1. DENEME: curl_cffi ile TLS Parmak İzi Taklidi (Doğrudan İstek)
-    try:
-        from curl_cffi import requests as curl_requests
-        for target_url in urls:
-            res = curl_requests.get(target_url, impersonate="chrome120", timeout=8)
-            if res.status_code == 200:
-                break
-    except Exception:
-        pass
+    last_error = ""
 
-    # 2. DENEME: Doğrudan istekler 403 alıyorsa Ücretsiz Proxy ile Tünelle
-    if res is None or res.status_code == 403:
+    # Katman 1: Standart requests + Custom Headers
+    for url in endpoints:
         try:
-            proxy_url = FreeProxy(rand=True, timeout=1).get()
-            proxies = {"http": proxy_url, "https": proxy_url}
-            
-            from curl_cffi import requests as curl_requests
-            res = curl_requests.get(urls[0], impersonate="chrome120", proxies=proxies, timeout=10)
-        except Exception:
-            # 3. DENEME: Cloudscraper + Proxy
-            try:
-                import cloudscraper
-                scraper = cloudscraper.create_scraper()
-                res = scraper.get(urls[0], timeout=10)
-            except Exception as e:
-                return pd.DataFrame(), f"Bağlantı/Proxy Hatası: {str(e)}"
+            r = requests.get(url, headers=headers, timeout=6)
+            if r.status_code == 200:
+                res = r
+                break
+        except Exception as e:
+            last_error = str(e)
 
-    if res is None or res.status_code != 200:
-        status_code = res.status_code if res else "Yanıt Yok"
-        return (
-            pd.DataFrame(),
-            f"Bybit API HTTP Hatası: {status_code} (GitHub/Cloudflare Engeli)",
-        )
+    # Katman 2: curl_cffi (TLS Impersonation)
+    if res is None:
+        try:
+            from curl_cffi import requests as curl_requests
+            for url in endpoints:
+                r = curl_requests.get(url, impersonate="chrome120", timeout=8)
+                if r.status_code == 200:
+                    res = r
+                    break
+        except Exception as e:
+            last_error = str(e)
+
+    # Katman 3: cloudscraper
+    if res is None:
+        try:
+            import cloudscraper
+            scraper = cloudscraper.create_scraper()
+            for url in endpoints:
+                r = scraper.get(url, timeout=8)
+                if r.status_code == 200:
+                    res = r
+                    break
+        except Exception as e:
+            last_error = str(e)
+
+    if res is None:
+        return pd.DataFrame(), f"Tüm API kanalları başarısız oldu. Son Hata: {last_error}"
 
     try:
         data = res.json()
-        
         if data.get("retCode") != 0:
-            return pd.DataFrame(), f"Bybit API Hata Mesajı: {data.get('retMsg')}"
+            return pd.DataFrame(), f"Bybit Hata Kodu: {data.get('retCode')} - {data.get('retMsg')}"
 
         ticker_list = data.get("result", {}).get("list", [])
-
         if not ticker_list:
-            return pd.DataFrame(), "API yanıt verdi fakat liste boş döndü."
+            return pd.DataFrame(), "API başarılı yanıt verdi ancak sembol listesi boş."
 
         df = pd.DataFrame(ticker_list)
-
-        # Sadece USDT çiftlerini alma
+        
+        # Sadece USDT perpetual (Vadeli) çiftleri al
         df = df[df["symbol"].str.endswith("USDT")].copy()
 
-        # Tip dönüşümleri
+        # Sayısal dönüşümler
         df["lastPrice"] = pd.to_numeric(df["lastPrice"], errors="coerce")
-        df["priceChangePercent"] = (
-            pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
-        )
-        df["quoteVolume"] = (
-            pd.to_numeric(df["turnover24h"], errors="coerce") / 1_000_000
-        )
+        df["priceChangePercent"] = pd.to_numeric(df["price24hPcnt"], errors="coerce") * 100
+        df["quoteVolume"] = pd.to_numeric(df["turnover24h"], errors="coerce") / 1_000_000
 
-        df = df.dropna(
-            subset=["lastPrice", "priceChangePercent", "quoteVolume"]
-        )
-
-        return (
-            df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]],
-            None,
-        )
+        df = df.dropna(subset=["lastPrice", "priceChangePercent", "quoteVolume"])
+        return df[["symbol", "lastPrice", "priceChangePercent", "quoteVolume"]], None
 
     except Exception as e:
-        return pd.DataFrame(), f"Veri İşleme Hatası: {str(e)}"
+        return pd.DataFrame(), f"JSON Format/Veri İşleme Hatası: {str(e)}"
 
 
 # Streamlit arayüzü için önbellekli versiyon
@@ -205,7 +207,7 @@ if not df.empty:
 else:
     if not err_msg:
         st.warning(
-            "⚠️ API verisi alındı fakat belirlenen filtre kriterlerine (Hacim / Değişim %) uyan coin bulunamadı."
+            "⚠️ API verisi başarıyla çekildi ancak filtre kriterlerine (Hacim / Değişim %) uyan coin bulunamadı."
         )
 
 
