@@ -10,7 +10,7 @@ import ta
 # 1. PAGE CONFIG
 # ==========================================
 st.set_page_config(
-    page_title="Kripto Piyasası Taraması & Risk/Ödül Analiz Paneli",
+    page_title="Çoklu Borsa Kripto Taraması & Risk/Ödül Paneli",
     page_icon="📊",
     layout="wide",
 )
@@ -32,12 +32,6 @@ else:
         "TELEGRAM_CHAT_ID", st.secrets.get("chat_id", "")
     )
 
-# Binance CCXT Kurulumu (Rate Limit & Timeout Korumalı)
-exchange = ccxt.binance({
-    "enableRateLimit": True,
-    "timeout": 10000,  # 10 saniye ağ bekleme süresi
-})
-
 # ==========================================
 # 3. SIDEBAR (SOL PANEL) AYARLARI
 # ==========================================
@@ -45,6 +39,28 @@ st.sidebar.title("⚙️ Panel ve Otomasyon Ayarları")
 
 # UptimeRobot Durum Bildirimi
 st.sidebar.success("🟢 **UptimeRobot:** Aktif\n(Ping istekleri sistemi uyanık tutar)")
+
+st.sidebar.markdown("---")
+
+# 🏛️ BORSA SEÇİMİ (Binance, OKX, Bybit, KuCoin)
+st.sidebar.subheader("🏛️ Borsa Seçimi")
+selected_exchange_id = st.sidebar.selectbox(
+    "Veri Çekilecek Borsa",
+    ["binance", "okx", "bybit", "kucoin"],
+    index=0,
+    format_func=lambda x: x.upper()
+)
+
+# Dinamik Borsa Bağlantı Motoru
+@st.cache_resource
+def get_exchange_instance(exchange_id):
+    exchange_class = getattr(ccxt, exchange_id)
+    return exchange_class({
+        "enableRateLimit": True,
+        "timeout": 10000,  # 10s timeout
+    })
+
+exchange = get_exchange_instance(selected_exchange_id)
 
 st.sidebar.markdown("---")
 
@@ -87,7 +103,7 @@ quntry_timeframe = st.sidebar.selectbox(
 
 st.sidebar.markdown("---")
 
-# Filtreleme Ayarları (Varsayılanlar Esnetildi)
+# Filtreleme Ayarları
 st.sidebar.subheader("🔍 Filtreleme Kriterleri")
 min_volume = st.sidebar.number_input(
     "Minimum 24h Hacim (Milyon $)", value=0.1, step=1.0
@@ -105,11 +121,16 @@ rsi_min, rsi_max = st.sidebar.slider(
 # ==========================================
 def fetch_symbol_data_safe(symbol, timeframe="1h", retries=2):
     """
-    Binance API'den canlı veri çeker, teknik indikatörleri hesaplar.
-    Ağ veya IP hatalarına karşı 2 kez tekrar dener.
+    Seçilen Borsadan (Binance/OKX/Bybit) canlı veri çeker.
+    Farklı borsa sembol formatlarını (BTC/USDT vs BTC-USDT) otomatik uyarlar.
     """
-    formatted_symbol = symbol if "/" in symbol else symbol.replace("USDT", "/USDT")
-    
+    # Borsa bazlı sembol formatlama (OKX: BTC/USDT, Binance/Bybit: BTC/USDT)
+    raw_sym = symbol.replace("/", "").replace("-", "")
+    if raw_sym.endswith("USDT"):
+        formatted_symbol = f"{raw_sym[:-4]}/USDT"
+    else:
+        formatted_symbol = symbol
+
     for attempt in range(retries):
         try:
             ohlcv = exchange.fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=100)
@@ -180,7 +201,10 @@ def fetch_symbol_data_safe(symbol, timeframe="1h", retries=2):
             time.sleep(2)
         except ccxt.RequestTimeout:
             time.sleep(1)
-        except Exception as e:
+        except ccxt.BadSymbol:
+            # Seçilen borsada o coin listeli değilse çökmeden atlasın
+            break
+        except Exception:
             break
 
     return None
@@ -207,9 +231,9 @@ def send_telegram_message(message):
 
 
 # ==========================================
-# 6. EKRAN ARAYÜZÜ VE TARTMA
+# 6. EKRAN ARAYÜZÜ VE TARAMA
 # ==========================================
-st.title("📊 Kripto Piyasası & Risk/Ödül Analiz Paneli")
+st.title(f"📊 Kripto Taraması & Analiz Paneli ({selected_exchange_id.upper()})")
 
 # Taramaları Gerçekleştir
 df_quntry_raw = analyze_symbol_list(quntry_symbol_list, timeframe=quntry_timeframe)
@@ -232,19 +256,19 @@ df_genel = apply_filters(df_genel_raw)
 # Özet Üst Metrikler
 c1, c2, c3 = st.columns(3)
 c1.metric(
-    "UptimeRobot Durumu",
-    "🟢 ONLINE",
-    f"Son Ping: {datetime.datetime.now().strftime('%H:%M:%S')}",
+    "Aktif Borsa & Uptime",
+    f"🏛️ {selected_exchange_id.upper()}",
+    f"Ping: {datetime.datetime.now().strftime('%H:%M:%S')}",
 )
-c2.metric("Quntry Fry Coin Sayısı", len(df_quntry_raw))
-c3.metric("Genel Taranan Coin Sayısı", len(df_genel_raw))
+c2.metric("Quntry Fry Bulunan", len(df_quntry_raw))
+c3.metric("Genel Bulunan Coin", len(df_genel_raw))
 
 # --- BÖLÜM 1: QUNTRY FRY LİSTESİ ---
 st.markdown("### 🍟 Quntry Fry Özel Takip Listesi")
 if not df_quntry.empty:
     st.dataframe(df_quntry, use_container_width=True)
 else:
-    st.warning("⚠️ Belirlenen filtre kriterlerine uyan Quntry Fry coini bulunamadı.")
+    st.warning(f"⚠️ {selected_exchange_id.upper()} borsasında filtrelere uyan Quntry Fry coini bulunamadı.")
     if not df_quntry_raw.empty:
         with st.expander("🔍 Tüm Quntry Fry Varlıklarının Ham Verisini Göster"):
             st.dataframe(df_quntry_raw, use_container_width=True)
@@ -256,7 +280,7 @@ st.markdown("### 🎯 Genel Piyasa Risk & Hedef Analizi")
 if not df_genel.empty:
     st.dataframe(df_genel, use_container_width=True)
 else:
-    st.warning("⚠️ Belirlenen filtre kriterlerine uyan Genel piyasa coini bulunamadı.")
+    st.warning(f"⚠️ {selected_exchange_id.upper()} borsasında filtrelere uyan coin bulunamadı.")
     if not df_genel_raw.empty:
         with st.expander("🔍 Taranan Tüm Genel Varlıkların Ham Verisini Göster"):
             st.dataframe(df_genel_raw, use_container_width=True)
@@ -265,7 +289,7 @@ else:
 st.sidebar.markdown("---")
 if st.sidebar.button("📤 Telegram Raporunu Şimdi Gönder"):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"📊 *ANLIK KRİPTO ANALİZ RAPORU*\n⏱️ *Update Time:* `{now_str}`\n\n"
+    msg = f"📊 *ANLIK KRİPTO RAPORU ({selected_exchange_id.upper()})*\n⏱️ *Update Time:* `{now_str}`\n\n"
 
     if not df_quntry_raw.empty:
         msg += "🍟 *QUNTRY FRY BİLDİRİMLERİ:*\n"
@@ -290,7 +314,7 @@ if enable_auto_telegram:
 
     if (CURRENT_TIME - st.session_state["last_bot_run"]) > THIRTY_MINUTES:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"🤖 *OTOMATİK PERİYODİK RAPOR*\n⏱️ *Update Time:* `{now_str}`\n\n"
+        msg = f"🤖 *OTOMATİK RAPOR ({selected_exchange_id.upper()})*\n⏱️ *Update Time:* `{now_str}`\n\n"
 
         if not df_quntry_raw.empty:
             msg += "🍟 *QUNTRY FRY LİSTESİ:*\n"
