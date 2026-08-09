@@ -79,17 +79,20 @@ enable_auto_telegram = st.sidebar.checkbox(
     "30 Dk'da Bir Otomatik Telegram Sinyali Gönder", value=True
 )
 
-only_signals_telegram = st.sidebar.checkbox(
-    "🔔 Telegram'a Sadece AL/GÜÇLÜ AL Sinyallerini Gönder", value=True
+min_score_telegram = st.sidebar.slider(
+    "🎯 Telegram Sinyal Filtresi (Min Skor)", 
+    min_value=50, 
+    max_value=90, 
+    value=75, 
+    step=5,
+    help="Sadece belirlenen puanın üzerindeki kaliteli sinyaller Telegram'a gönderilir."
 )
 
 st.sidebar.markdown("---")
 
-# Quntry Fry Özel Takip Listesi (İçerideki sabit değişkeniniz)
+# Quntry Fry Özel Takip Listesi
 st.sidebar.subheader("🍟 Quntry Fry Özel Takip Listesi")
-
-# 📌 İLERİDE BURADAKİ COIN LİSTESİNİ KOD İÇİNDEN KOLAYCA DEĞİŞTİREBİLİRSİNİZ:
-quntry_default = "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, ADAUSDT, DOTUSDT, SHIBUSDT, MATICUSDT, LTCUSDT, TRONUSDT, UNIUSDT, ATOMUSDT, APTUSDT, ARBUSDT, OPUSDT, INJUSDT, SUIUSDT, FETUSDT, RENDERUSDT, PEPEUSDT, FLOKIUSDT, BONKUSDT, TIAUSDT, SEIUSDT, FILUSDT, ICPUSDT"
+quntry_default = "BICOUSDT, RECALLUSDT, ZDTUSDT, BEATUSDT"
 
 quntry_input = st.sidebar.text_area(
     "Quntry Fry Coinleri (Virgülle ayırın)", value=quntry_default, height=60
@@ -113,10 +116,10 @@ rsi_min, rsi_max = st.sidebar.slider("RSI (14) Aralığı", 0, 100, (0, 100))
 
 
 # ==========================================
-# 4. AKILLI ANALİZ MOTORU & YARDIMCI FİLTRELER
+# 4. AKILLI ANALİZ MOTORU & SKORLAMA (GELİŞMİŞ)
 # ==========================================
 
-@st.cache_data(ttl=300) # 5 dakikada bir hacim listesini günceller
+@st.cache_data(ttl=300)
 def get_top_volume_symbols(limit=50):
     """Binance borsasından 24h hacmi en yüksek USDT çiftlerini otomatik çeker."""
     try:
@@ -125,17 +128,14 @@ def get_top_volume_symbols(limit=50):
         usdt_pairs = []
         for symbol, ticker in tickers.items():
             if symbol.endswith("/USDT") and ticker.get("quoteVolume") is not None:
-                # Kaldıraçlı/Leveraged (UP/DOWN/BEAR/BULL) coinleri ele
                 if not any(x in symbol for x in ["UP/", "DOWN/", "BEAR/", "BULL/"]):
                     usdt_pairs.append({
                         "symbol": symbol.replace("/", ""),
                         "volume": ticker["quoteVolume"]
                     })
-        # Hacme göre büyükten küçüğe sırala
         df_sorted = pd.DataFrame(usdt_pairs).sort_values(by="volume", ascending=False)
         return df_sorted.head(limit)["symbol"].tolist()
-    except Exception as e:
-        # Hata durumunda varsayılan yedek popüler coinler
+    except Exception:
         return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "NEARUSDT", "LINKUSDT", "DOGEUSDT", "XRPUSDT"]
 
 
@@ -201,46 +201,66 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
             price = float(latest["close"])
 
             recent_resistance = float(df["high"].tail(20).max())
-
             first_price = float(df.iloc[0]["close"])
             change_24h = ((price - first_price) / first_price) * 100
             vol_24h_m = (df["volume"].sum() * price) / 1_000_000
 
-            is_volume_surge = latest["volume"] > (latest["vol_sma"] * 1.3)
+            # --- AKILLI PUANLAMA (SKOR) HESABI ---
+            score = 0
+            score_reasons = []
+
+            # 1. BTC Piyasa Durumu (+20 Puan)
+            if btc_status == "BULLISH":
+                score += 20
+                score_reasons.append("BTC Trendi Pozitif")
+
+            # 2. 1H Trend (EMA50 üzeri) (+20 Puan)
             is_bullish_1h = price > latest["ema50"]
-            is_macd_cross = (prev["macd"] < prev["macd_signal"]) and (latest["macd"] > latest["macd_signal"])
+            if is_bullish_1h:
+                score += 20
+                score_reasons.append("1H EMA50 Üzerinde")
 
+            # 3. 4H Ana Trend Uyumu (+20 Puan)
             is_bullish_4h = check_4h_trend(ex_instance, formatted_symbol)
+            if is_bullish_4h:
+                score += 20
+                score_reasons.append("4H Ana Trend Uyumlu")
 
-            if is_bullish_1h and is_macd_cross and is_volume_surge and (latest["rsi"] < 68):
-                if btc_status == "BEARISH":
-                    signal = "⚠️ RISK (BTC DÜŞÜŞTE)"
-                    comment = "🟡 Sinyal var fakat BTC trendi olumsuz!"
-                elif not is_bullish_4h:
-                    signal = "AL (KISA VADELİ TEPKİ)"
-                    comment = "🟠 1H Pozitif ama 4H Ana Trend Düşüşte!"
-                else:
-                    signal = "GÜÇLÜ AL"
-                    comment = "🟢 Hacim + 4H Trend + MACD Onaylı"
-            elif is_bullish_1h and (latest["rsi"] < 60):
-                signal = "AL"
-                comment = "🟡 Trend Pozitif"
-            elif (latest["rsi"] > 70) or (price < latest["ema50"] and not is_volume_surge):
-                signal = "SAT / RISKLİ"
-                comment = "🔴 Sahte Kırılım / Aşırı Alım"
+            # 4. Hacim Teyidi (+20 Puan)
+            is_volume_surge = latest["volume"] > (latest["vol_sma"] * 1.3)
+            if is_volume_surge:
+                score += 20
+                score_reasons.append("Yüksek Hacim Patlaması")
+
+            # 5. MACD Kesişimi & RSI İdeal Seviye (+20 Puan)
+            is_macd_cross = (prev["macd"] < prev["macd_signal"]) and (latest["macd"] > latest["macd_signal"])
+            rsi_val = float(latest["rsi"])
+            if is_macd_cross and (35 <= rsi_val <= 65):
+                score += 20
+                score_reasons.append("MACD Al Kesişimi & RSI İdeal")
+
+            # Sinyal Sınıflandırması
+            if score >= 80:
+                signal = "🔥 GÜÇLÜ AL"
+            elif score >= 60:
+                signal = "🟢 AL"
+            elif score >= 40:
+                signal = "🟡 NÖTR / İZLE"
             else:
-                signal = "NÖTR"
-                comment = "⚪ Yatay Piyasa"
+                signal = "🔴 SAT / ZAYIF"
 
+            comment = " | ".join(score_reasons) if score_reasons else "Zayıf göstergeler"
+
+            # --- KADEMELİ KAR AL (TP1, TP2, TP3) & STOP LOSS HESABI ---
             atr_val = float(latest["atr"])
             stop_loss = round(price - (atr_val * 1.5), 4)
-            target_tp1 = round(price + (atr_val * 2.0), 4)
+            target_tp1 = round(price + (atr_val * 1.2), 4)  # Hızlı Kar Al (Break-even)
+            target_tp2 = round(price + (atr_val * 2.5), 4)  # Ana Hedef
+            target_tp3 = round(max(price + (atr_val * 4.0), recent_resistance), 4) # Maksimum Direnç Hedefi
 
             risk_per_coin = price - stop_loss
-            reward_per_coin = target_tp1 - price
+            reward_per_coin = target_tp2 - price
             rr_ratio = round(reward_per_coin / risk_per_coin, 2) if risk_per_coin > 0 else 0
-
-            dist_to_resistance_pct = round(((recent_resistance - price) / price) * 100, 2)
 
             sl_pct = (risk_per_coin / price)
             max_risk_amount = user_balance * (user_risk_pct / 100)
@@ -251,14 +271,16 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False, btc
                 "Sembol": symbol,
                 "Kaynak Borsa": ex_name,
                 "Fiyat ($)": price,
+                "Güven Skoru": score,
                 "24h Değişim (%)": round(change_24h, 2),
                 "24h Hacim (M$)": round(vol_24h_m, 2),
-                "RSI (14)": round(float(latest["rsi"]), 1),
+                "RSI (14)": round(rsi_val, 1),
                 "Stop Loss": stop_loss,
                 "Hedef (TP1)": target_tp1,
+                "Hedef (TP2)": target_tp2,
+                "Hedef (TP3)": target_tp3,
                 "R:R Oranı": rr_ratio,
-                "Direnç Mesafesi (%)": dist_to_resistance_pct,
-                "Önerilen Pozisyon ($)": rec_position_size,
+                "Önerilen Poz ($)": rec_position_size,
                 "Sinyal": signal,
                 "Yorum": comment,
                 "Update Time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -282,7 +304,7 @@ def analyze_symbol_list_fast(symbols, timeframe="1h", btc_status="BULLISH"):
 
 
 # ==========================================
-# 5. TELEGRAM BİLDİRİM FONKSİYONU
+# 5. TELEGRAM BİLDİRİM FONKSİYONU (YENİ SADE FORMAT)
 # ==========================================
 def send_telegram_message(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -296,22 +318,48 @@ def send_telegram_message(message):
         return False, str(e)
 
 
+def build_clean_telegram_report(df_raw, title, min_score=75):
+    """Kafa karıştırmayan, sade ve aksiyon odaklı Telegram mesaj kartı oluşturur."""
+    if df_raw.empty:
+        return ""
+    
+    # Skor filtresine uyan yüksek kaliteli sinyalleri seç
+    filtered_df = df_raw[df_raw["Güven Skoru"] >= min_score].sort_values(by="Güven Skoru", ascending=False)
+    
+    if filtered_df.empty:
+        return ""
+
+    msg = f"{title}\n"
+    for _, row in filtered_df.iterrows():
+        msg += f"───────────────────────\n"
+        msg += f"🎯 *{row['Sinyal']}* (%{row['Güven Skoru']} Güven Skoru)\n"
+        msg += f"🪙 *Coin:* `{row['Sembol']}` ({row['Kaynak Borsa']})\n"
+        msg += f"🟢 *Giriş Fiyatı:* `${row['Fiyat ($)']}`\n"
+        msg += f"🛑 *Stop Loss:* `${row['Stop Loss']}`\n"
+        msg += f"🎯 *Hedef 1 (TP1):* `${row['Hedef (TP1)']}` _(Hızlı Kar/Break-even)_\n"
+        msg += f"🎯 *Hedef 2 (TP2):* `${row['Hedef (TP2)']}` _(Ana Hedef)_\n"
+        msg += f"🚀 *Hedef 3 (TP3):* `${row['Hedef (TP3)']}` _(Direnç / Boğa Target)_\n"
+        msg += f"💰 *Önerilen Poz Büyüklüğü:* `${row['Önerilen Poz ($)']}`\n"
+        msg += f"💡 *Özet Neden:* _{row['Yorum']}_\n"
+    
+    return msg
+
+
 # ==========================================
 # 6. EKRAN ARAYÜZÜ VE TARAMA
 # ==========================================
 st.title("🛡️ Akıllı Kripto Analiz & Risk Yönetim Paneli")
 
-# 1. Dinamik Liste Çekimi (Slider'dan alınan limit adedi kadar çekilir)
+# Dinamik Liste Çekimi
 dynamic_genel_symbols = get_top_volume_symbols(limit=top_coin_limit)
 
-# BTC Trendini Kontrol Et
+# BTC Trend Kontrolü
 btc_status, btc_price = get_btc_market_status()
 
-# BTC Piyasa Durum Kartı
 if btc_status == "BULLISH":
     st.success(f"🟢 **Piyasa Durumu:** Bitcoin (BTC) `${btc_price}` ile **YÜKSELİŞ TRENDİNDE**. Altcoin sinyalleri güvenli.")
 elif btc_status == "BEARISH":
-    st.error(f"🔴 **Piyasa Durumu:** Bitcoin (BTC) `${btc_price}` ile **DÜŞÜŞ TRENDİNDE**. Altcoin 'AL' sinyallerinde DİKKATLİ olun!")
+    st.error(f"🔴 **Piyasa Durumu:** Bitcoin (BTC) `${btc_price}` ile **DÜŞÜŞ TRENDİNDE**. Altcoin sinyallerinde DİKKATLİ olun!")
 else:
     st.warning("⚠️ BTC piyasa trendi alınamadı, genel tarama yapılıyor.")
 
@@ -344,7 +392,7 @@ c4.metric("Kasa / İşlem Riski", f"${user_balance} / %{user_risk_pct}")
 # --- BÖLÜM 1: QUNTRY FRY LİSTESİ ---
 st.markdown("### 🍟 Quntry Fry Özel Takip Listesi")
 if not df_quntry.empty:
-    st.dataframe(df_quntry, use_container_width=True)
+    st.dataframe(df_quntry.sort_values(by="Güven Skoru", ascending=False), use_container_width=True)
 else:
     st.warning("⚠️ Belirlenen filtrelere uyan Quntry Fry coini bulunamadı.")
 
@@ -353,7 +401,7 @@ st.markdown("---")
 # --- BÖLÜM 2: GENEL PİYASA ANALİZİ ---
 st.markdown(f"### 🎯 Piyasadaki En Hacimli Top {top_coin_limit} Coin Analizi (Otomatik)")
 if not df_genel.empty:
-    st.dataframe(df_genel, use_container_width=True)
+    st.dataframe(df_genel.sort_values(by="Güven Skoru", ascending=False), use_container_width=True)
 else:
     st.warning("⚠️ Belirlenen filtrelere uyan Genel piyasa coini bulunamadı.")
 
@@ -390,7 +438,7 @@ if selected_chart_symbol:
         fig.add_trace(go.Scatter(
             x=df_chart['datetime'], y=df_chart['rsi'],
             mode='lines', name='RSI', line=dict(color='purple', width=1.5)
-        ), row=2, col=1)
+        ), row=1, col=1)
 
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
@@ -399,44 +447,28 @@ if selected_chart_symbol:
         st.plotly_chart(fig, use_container_width=True)
 
 # --- BÖLÜM 4: TELEGRAM BİLDİRİMLERİ ---
-def build_telegram_report(df_raw, title):
-    if df_raw.empty:
-        return ""
-    
-    msg = f"{title}\n"
-    has_signal = False
-    for _, row in df_raw.iterrows():
-        if only_signals_telegram and row['Sinyal'] not in ["AL", "GÜÇLÜ AL", "AL (KISA VADELİ TEPKİ)"]:
-            continue
-        has_signal = True
-        msg += f"• *{row['Sembol']}* ({row['Kaynak Borsa']}): `${row['Fiyat ($)']}`\n"
-        msg += f"  └ Sinyal: `{row['Sinyal']}` | Önerilen Poz: `${row['Önerilen Pozisyon ($)']}`\n"
-        msg += f"  └ SL: `${row['Stop Loss']}` | TP1: `${row['Hedef (TP1)']}` | R:R: `{row['R:R Oranı']}`\n"
-    
-    return msg if has_signal else ""
-
 st.sidebar.markdown("---")
 if st.sidebar.button("📤 Telegram Raporunu Şimdi Gönder"):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg = f"🛡️ *AKILLI KRİPTO FIRSAT RAPORU*\n⏱️ *Saat:* `{now_str}`\n"
-    msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n\n"
+    msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n"
 
-    quntry_msg = build_telegram_report(df_quntry_raw, "🍟 *QUNTRY FRY SİNYALLERİ:*")
-    genel_msg = build_telegram_report(df_genel_raw, f"🎯 *DİNAMİK TOP {top_coin_limit} PİYASA SİNYALLERİ:*")
+    quntry_msg = build_clean_telegram_report(df_quntry_raw, "\n🍟 *QUNTRY FRY SİNYALLERİ:*", min_score=min_score_telegram)
+    genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top_coin_limit} SİNYALLERİ:*", min_score=min_score_telegram)
 
-    total_msg = msg + quntry_msg + "\n" + genel_msg
+    total_msg = msg + quntry_msg + genel_msg
 
-    if quntry_msg or genel_msg or not only_signals_telegram:
+    if quntry_msg or genel_msg:
         success, err = send_telegram_message(total_msg)
         if success:
-            st.sidebar.success("✅ Akıllı Rapor Telegram'a gönderildi!")
+            st.sidebar.success("✅ Yüksek kaliteli sinyal raporu Telegram'a gönderildi!")
         else:
             st.sidebar.error(f"❌ Hata: {err}")
     else:
-        st.sidebar.info("ℹ️ Şu an filtrelere uygun riskiz 'AL' sinyali yok.")
+        st.sidebar.info(f"ℹ️ Şu an {min_score_telegram}+ puanı geçen kalitede sinyal bulunamadı.")
 
 # ==========================================
-# 7. OTOMATİK ZAMANLAYICI
+# 7. OTOMATİK ZAMANLAYICI (30 DAKİKADA BİR)
 # ==========================================
 if enable_auto_telegram:
     if "last_bot_run" not in st.session_state:
@@ -448,14 +480,7 @@ if enable_auto_telegram:
     if (CURRENT_TIME - st.session_state["last_bot_run"]) > THIRTY_MINUTES:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         msg = f"🛡️ *AKILLI KRİPTO OTOMATİK RAPOR*\n⏱️ *Saat:* `{now_str}`\n"
-        msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n\n"
+        msg += f"📊 *BTC Trend:* `{btc_status}` (`${btc_price}`)\n"
 
-        quntry_msg = build_telegram_report(df_quntry_raw, "🍟 *QUNTRY FRY LİSTESİ:*")
-        genel_msg = build_telegram_report(df_genel_raw, f"🎯 *DİNAMİK TOP {top_coin_limit} PİYASA LİSTESİ:*")
-        
-        total_msg = msg + quntry_msg + "\n" + genel_msg
-
-        if quntry_msg or genel_msg or not only_signals_telegram:
-            send_telegram_message(total_msg)
-        
-        st.session_state["last_bot_run"] = CURRENT_TIME
+        quntry_msg = build_clean_telegram_report(df_quntry_raw, "\n🍟 *QUNTRY FRY SİNYALLERİ:*", min_score=min_score_telegram)
+        genel_msg = build_clean_telegram_report(df_genel_raw, f"\n🎯 *DİNAMİK TOP {top
