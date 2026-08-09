@@ -1,7 +1,10 @@
 import datetime
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import ccxt
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import requests
 import streamlit as st
 import ta
@@ -32,7 +35,7 @@ else:
         "TELEGRAM_CHAT_ID", st.secrets.get("chat_id", "")
     )
 
-# Çoklu Borsa Nesnelerini Başlat (Binance, OKX, Bybit, KuCoin, Coinbase)
+# Çoklu Borsa Nesnelerini Başlat
 @st.cache_resource
 def init_exchanges():
     exchanges = {
@@ -59,9 +62,13 @@ enable_auto_telegram = st.sidebar.checkbox(
     "30 Dk'da Bir Otomatik Telegram Sinyali Gönder", value=True
 )
 
+only_signals_telegram = st.sidebar.checkbox(
+    "🔔 Telegram'a Sadece AL/GÜÇLÜ AL Sinyallerini Gönder", value=True
+)
+
 st.sidebar.markdown("---")
 
-# Genel Taranacak Semboller (RESİMLERDEKİ TÜM COINLER EKLENDİ)
+# Genel Taranacak Semboller
 st.sidebar.subheader("📝 Genel Taranacak Semboller")
 default_symbols = (
     "BTCUSDT, ETHUSDT, SOLUSDT, AVAXUSDT, NEARUSDT, LINKUSDT, DOGEUSDT, XRPUSDT, "
@@ -114,10 +121,10 @@ rsi_min, rsi_max = st.sidebar.slider(
 # ==========================================
 # 4. ÇOKLU BORSA OTOMATİK VERİ VE ANALİZ MOTORU
 # ==========================================
-def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
+def fetch_symbol_from_all_exchanges(symbol, timeframe="1h", return_df=False):
     """
     Coin'i sırasıyla Binance, OKX, Bybit, KuCoin ve Coinbase üzerinde arar.
-    Listeli olduğu ilk borsadan veriyi çeker ve borsa adıyla döndürür.
+    Listeli olduğu ilk borsadan veriyi çeker.
     """
     raw_sym = symbol.replace("/", "").replace("-", "")
     if raw_sym.endswith("USDT"):
@@ -134,6 +141,7 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
             df = pd.DataFrame(
                 ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
             )
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
 
             # İndikatör Hesaplamaları
             df["rsi"] = ta.momentum.rsi(df["close"], window=14)
@@ -146,6 +154,9 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
                 df["high"], df["low"], df["close"], window=14
             )
             df["vol_sma"] = df["volume"].rolling(window=20).mean()
+
+            if return_df:
+                return df, ex_name
 
             latest = df.iloc[-1]
             prev = df.iloc[-2]
@@ -194,12 +205,20 @@ def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
         except Exception:
             continue
 
-    return None
+    return None if not return_df else (None, None)
 
 
-def analyze_symbol_list(symbols, timeframe="1h"):
-    results = [fetch_symbol_from_all_exchanges(sym, timeframe=timeframe) for sym in symbols]
-    return pd.DataFrame([r for r in results if r is not None])
+# --- ⚡ GELİŞTİRME 1: PARALEL HIZLI TARAMA (ThreadPoolExecutor) ---
+def analyze_symbol_list_fast(symbols, timeframe="1h"):
+    results = []
+    # Maximum 10 paralel istek atarak taramayı hızlandırıyoruz
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(fetch_symbol_from_all_exchanges, sym, timeframe) for sym in symbols]
+        for future in as_completed(futures):
+            res = future.result()
+            if res is not None:
+                results.append(res)
+    return pd.DataFrame(results)
 
 
 # ==========================================
@@ -220,11 +239,13 @@ def send_telegram_message(message):
 # ==========================================
 # 6. EKRAN ARAYÜZÜ VE TARAMA
 # ==========================================
-st.title("🌐 Tüm Borsalar Otomatik Kripto Taraması (Binance / OKX / Bybit / KuCoin / Coinbase)")
+st.title("🌐 Tüm Borsalar Otomatik Kripto Taraması (Hızlı & Grafik Destekli)")
 
-# Taramaları Gerçekleştir
-df_quntry_raw = analyze_symbol_list(quntry_symbol_list, timeframe=quntry_timeframe)
-df_genel_raw = analyze_symbol_list(custom_symbol_list, timeframe="1h")
+# Taramaları Paralel Olarak Hızlıca Gerçekleştir
+start_time = time.time()
+df_quntry_raw = analyze_symbol_list_fast(quntry_symbol_list, timeframe=quntry_timeframe)
+df_genel_raw = analyze_symbol_list_fast(custom_symbol_list, timeframe="1h")
+scan_duration = round(time.time() - start_time, 2)
 
 # Sol Panel Filtrelerini Uygula
 def apply_filters(df):
@@ -243,8 +264,8 @@ df_genel = apply_filters(df_genel_raw)
 # Özet Üst Metrikler
 c1, c2, c3 = st.columns(3)
 c1.metric(
-    "Tarama Modu",
-    "Otomatik Havuz",
+    "Tarama Süresi",
+    f"{scan_duration} saniye",
     f"Ping: {datetime.datetime.now().strftime('%H:%M:%S')}",
 )
 c2.metric("Quntry Fry Bulunan", len(df_quntry_raw))
@@ -272,22 +293,86 @@ else:
         with st.expander("🔍 Taranan Tüm Genel Varlıkların Ham Verisini Göster"):
             st.dataframe(df_genel_raw, use_container_width=True)
 
+st.markdown("---")
+
+# --- 📊 GELİŞTİRME 2: İNTERAKTİF GRAFİK EKRANI (Plotly) ---
+st.markdown("### 📈 Canlı Grafik İnceleme Paneli")
+all_available_symbols = list(set(custom_symbol_list + quntry_symbol_list))
+selected_chart_symbol = st.selectbox("Grafiğini Görmek İstediğiniz Coini Seçin:", all_available_symbols)
+
+if selected_chart_symbol:
+    df_chart, chart_ex_name = fetch_symbol_from_all_exchanges(selected_chart_symbol, timeframe="1h", return_df=True)
+    if df_chart is not None:
+        st.info(f"📍 **{selected_chart_symbol}** verisi **{chart_ex_name}** borsasından çekildi.")
+        
+        # Plotly Subplot Oluşturma (Üstte Mum + EMA, Altta RSI)
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, 
+            vertical_spacing=0.08, subplot_titles=(f"{selected_chart_symbol} Fiyat Grafik & EMA50", "RSI (14) Göstergesi"),
+            row_heights=[0.7, 0.3]
+        )
+
+        # 1. Mum Grafiği
+        fig.add_trace(go.Candlestick(
+            x=df_chart['datetime'],
+            open=df_chart['open'], high=df_chart['high'],
+            low=df_chart['low'], close=df_chart['close'],
+            name="Fiyat"
+        ), row=1, col=1)
+
+        # EMA 50
+        fig.add_trace(go.Scatter(
+            x=df_chart['datetime'], y=df_chart['ema50'],
+            mode='lines', name='EMA 50', line=dict(color='orange', width=1.5)
+        ), row=1, col=1)
+
+        # 2. RSI Çizgisi ve Referans Seviyeleri (30 & 70)
+        fig.add_trace(go.Scatter(
+            x=df_chart['datetime'], y=df_chart['rsi'],
+            mode='lines', name='RSI', line=dict(color='purple', width=1.5)
+        ), row=2, col=1)
+
+        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+        fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+
+# --- 🚨 GELİŞTİRME 3: AKILLI TELEGRAM FİLTRELİ MESAJ GÖNDERİMİ ---
+def build_telegram_report(df_raw, title):
+    if df_raw.empty:
+        return ""
+    
+    msg = f"{title}\n"
+    has_signal = False
+    for _, row in df_raw.iterrows():
+        # Sadece AL veya GÜÇLÜ AL olanları filtrele (seçeneğe bağlı)
+        if only_signals_telegram and row['Sinyal'] not in ["AL", "GÜÇLÜ AL"]:
+            continue
+        has_signal = True
+        msg += f"• *{row['Sembol']}* ({row['Kaynak Borsa']}): `${row['Fiyat ($)']}` | Sinyal: `{row['Sinyal']}` | SL: `${row['Stop Loss']}` | TP1: `${row['Hedef 1 (TP1)']}`\n"
+    
+    return msg if has_signal else ""
+
 # Manuel Telegram Sinyal Butonu
 st.sidebar.markdown("---")
 if st.sidebar.button("📤 Telegram Raporunu Şimdi Gönder"):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"📊 *ANLIK KRİPTO OTOMATİK BORSALAR RAPORU*\n⏱️ *Update Time:* `{now_str}`\n\n"
+    msg = f"📊 *ANLIK KRİPTO OTOMATİK RAPOR*\n⏱️ *Update Time:* `{now_str}`\n\n"
 
-    if not df_quntry_raw.empty:
-        msg += "🍟 *QUNTRY FRY BİLDİRİMLERİ:*\n"
-        for _, row in df_quntry_raw.iterrows():
-            msg += f"• *{row['Sembol']}* ({row['Kaynak Borsa']}): `${row['Fiyat ($)']}` | RSI: `{row['RSI (14)']}` | Sinyal: `{row['Sinyal']}`\n"
+    quntry_msg = build_telegram_report(df_quntry_raw, "🍟 *QUNTRY FRY FIRSATLARI:*")
+    genel_msg = build_telegram_report(df_genel_raw, "🎯 *GENEL PİYASA FIRSATLARI:*")
 
-    success, err = send_telegram_message(msg)
-    if success:
-        st.sidebar.success("✅ Rapor Telegram'a gönderildi!")
+    total_msg = msg + quntry_msg + "\n" + genel_msg
+
+    if quntry_msg or genel_msg or not only_signals_telegram:
+        success, err = send_telegram_message(total_msg)
+        if success:
+            st.sidebar.success("✅ Rapor Telegram'a gönderildi!")
+        else:
+            st.sidebar.error(f"❌ Hata: {err}")
     else:
-        st.sidebar.error(f"❌ Hata: {err}")
+        st.sidebar.info("ℹ️ Şuan kriterlere uyan AL / GÜÇLÜ AL sinyali yok.")
 
 # ==========================================
 # 7. OTOMATİK ZAMANLAYICI (UPTIMEROBOT UYUMLU)
@@ -301,12 +386,14 @@ if enable_auto_telegram:
 
     if (CURRENT_TIME - st.session_state["last_bot_run"]) > THIRTY_MINUTES:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"🤖 *OTOMATİK PERİYODİK BORSALAR RAPORU*\n⏱️ *Update Time:* `{now_str}`\n\n"
+        msg = f"🤖 *OTOMATİK PERİYODİK RAPOR*\n⏱️ *Update Time:* `{now_str}`\n\n"
 
-        if not df_quntry_raw.empty:
-            msg += "🍟 *QUNTRY FRY LİSTESİ:*\n"
-            for _, row in df_quntry_raw.iterrows():
-                msg += f"• *{row['Sembol']}* ({row['Kaynak Borsa']}): `${row['Fiyat ($)']}` | Durum: `{row['Sinyal']}`\n"
+        quntry_msg = build_telegram_report(df_quntry_raw, "🍟 *QUNTRY FRY LİSTESİ:*")
+        genel_msg = build_telegram_report(df_genel_raw, "🎯 *GENEL PİYASA LİSTESİ:*")
+        
+        total_msg = msg + quntry_msg + "\n" + genel_msg
 
-        send_telegram_message(msg)
+        if quntry_msg or genel_msg or not only_signals_telegram:
+            send_telegram_message(total_msg)
+        
         st.session_state["last_bot_run"] = CURRENT_TIME
