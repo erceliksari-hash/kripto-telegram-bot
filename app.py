@@ -10,7 +10,7 @@ import ta
 # 1. PAGE CONFIG
 # ==========================================
 st.set_page_config(
-    page_title="Çoklu Borsa Kripto Taraması & Risk/Ödül Paneli",
+    page_title="Tüm Borsalar Otomatik Kripto Taraması",
     page_icon="📊",
     layout="wide",
 )
@@ -32,39 +32,28 @@ else:
         "TELEGRAM_CHAT_ID", st.secrets.get("chat_id", "")
     )
 
+# Çoklu Borsa Nesnelerini Başlat (Binance, OKX, Bybit, KuCoin)
+@st.cache_resource
+def init_exchanges():
+    exchanges = {
+        "Binance": ccxt.binance({"enableRateLimit": True, "timeout": 8000}),
+        "OKX": ccxt.okx({"enableRateLimit": True, "timeout": 8000}),
+        "Bybit": ccxt.bybit({"enableRateLimit": True, "timeout": 8000}),
+        "KuCoin": ccxt.kucoin({"enableRateLimit": True, "timeout": 8000}),
+    }
+    return exchanges
+
+EXCHANGES = init_exchanges()
+
 # ==========================================
 # 3. SIDEBAR (SOL PANEL) AYARLARI
 # ==========================================
 st.sidebar.title("⚙️ Panel ve Otomasyon Ayarları")
 
-# UptimeRobot Durum Bildirimi
-st.sidebar.success("🟢 **UptimeRobot:** Aktif\n(Ping istekleri sistemi uyanık tutar)")
+st.sidebar.success("🟢 **UptimeRobot:** Aktif\n(Tüm borsalar otomatik taranır)")
 
 st.sidebar.markdown("---")
 
-# 🏛️ BORSA SEÇİMİ (Binance, OKX, Bybit, KuCoin)
-st.sidebar.subheader("🏛️ Borsa Seçimi")
-selected_exchange_id = st.sidebar.selectbox(
-    "Veri Çekilecek Borsa",
-    ["binance", "okx", "bybit", "kucoin"],
-    index=0,
-    format_func=lambda x: x.upper()
-)
-
-# Dinamik Borsa Bağlantı Motoru
-@st.cache_resource
-def get_exchange_instance(exchange_id):
-    exchange_class = getattr(ccxt, exchange_id)
-    return exchange_class({
-        "enableRateLimit": True,
-        "timeout": 10000,  # 10s timeout
-    })
-
-exchange = get_exchange_instance(selected_exchange_id)
-
-st.sidebar.markdown("---")
-
-# Otomatik Telegram Bildirim Checkbox
 enable_auto_telegram = st.sidebar.checkbox(
     "30 Dk'da Bir Otomatik Telegram Sinyali Gönder", value=True
 )
@@ -117,25 +106,24 @@ rsi_min, rsi_max = st.sidebar.slider(
 
 
 # ==========================================
-# 4. CANLI VERİ VE ANALİZ MOTORU
+# 4. ÇOKLU BORSA OTOMATİK VERİ VE ANALİZ MOTORU
 # ==========================================
-def fetch_symbol_data_safe(symbol, timeframe="1h", retries=2):
+def fetch_symbol_from_all_exchanges(symbol, timeframe="1h"):
     """
-    Seçilen Borsadan (Binance/OKX/Bybit) canlı veri çeker.
-    Farklı borsa sembol formatlarını (BTC/USDT vs BTC-USDT) otomatik uyarlar.
+    Coin'i sırasıyla Binance, OKX, Bybit ve KuCoin üzerinde arar.
+    Listeli olduğu ilk borsadan veriyi çeker ve borsa adıyla döndürür.
     """
-    # Borsa bazlı sembol formatlama (OKX: BTC/USDT, Binance/Bybit: BTC/USDT)
     raw_sym = symbol.replace("/", "").replace("-", "")
     if raw_sym.endswith("USDT"):
         formatted_symbol = f"{raw_sym[:-4]}/USDT"
     else:
         formatted_symbol = symbol
 
-    for attempt in range(retries):
+    for ex_name, ex_instance in EXCHANGES.items():
         try:
-            ohlcv = exchange.fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=100)
+            ohlcv = ex_instance.fetch_ohlcv(formatted_symbol, timeframe=timeframe, limit=100)
             if not ohlcv or len(ohlcv) < 50:
-                return None
+                continue
 
             df = pd.DataFrame(
                 ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
@@ -162,14 +150,13 @@ def fetch_symbol_data_safe(symbol, timeframe="1h", retries=2):
             change_24h = ((price - first_price) / first_price) * 100
             vol_24h_m = (df["volume"].sum() * price) / 1_000_000
 
-            # Sahte Kırılım (Fakeout) & Hacim Onayı Kontrolü
+            # Kırılım & Hacim Onayı Kontrolü
             is_volume_surge = latest["volume"] > (latest["vol_sma"] * 1.3)
             is_bullish = price > latest["ema50"]
             is_macd_cross = (prev["macd"] < prev["macd_signal"]) and (
                 latest["macd"] > latest["macd_signal"]
             )
 
-            # Sinyal Mantığı
             if is_bullish and is_macd_cross and is_volume_surge and (latest["rsi"] < 68):
                 signal = "GÜÇLÜ AL"
                 comment = "🟢 Hacim Onaylı Trend Kırılımı"
@@ -186,6 +173,7 @@ def fetch_symbol_data_safe(symbol, timeframe="1h", retries=2):
             atr_val = float(latest["atr"])
             return {
                 "Sembol": symbol,
+                "Kaynak Borsa": ex_name,  # Hangi borsadan çekildiğini gösterir
                 "Fiyat ($)": price,
                 "24h Değişim (%)": round(change_24h, 2),
                 "24h Hacim (M$)": round(vol_24h_m, 2),
@@ -197,21 +185,15 @@ def fetch_symbol_data_safe(symbol, timeframe="1h", retries=2):
                 "Update Time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
 
-        except ccxt.DDoSProtection:
-            time.sleep(2)
-        except ccxt.RequestTimeout:
-            time.sleep(1)
-        except ccxt.BadSymbol:
-            # Seçilen borsada o coin listeli değilse çökmeden atlasın
-            break
         except Exception:
-            break
+            # Seçilen borsada yoksa bir sonraki borsaya geçer
+            continue
 
     return None
 
 
 def analyze_symbol_list(symbols, timeframe="1h"):
-    results = [fetch_symbol_data_safe(sym, timeframe=timeframe) for sym in symbols]
+    results = [fetch_symbol_from_all_exchanges(sym, timeframe=timeframe) for sym in symbols]
     return pd.DataFrame([r for r in results if r is not None])
 
 
@@ -233,7 +215,7 @@ def send_telegram_message(message):
 # ==========================================
 # 6. EKRAN ARAYÜZÜ VE TARAMA
 # ==========================================
-st.title(f"📊 Kripto Taraması & Analiz Paneli ({selected_exchange_id.upper()})")
+st.title("🌐 Tüm Borsalar Otomatik Kripto Taraması (Binance / OKX / Bybit / KuCoin)")
 
 # Taramaları Gerçekleştir
 df_quntry_raw = analyze_symbol_list(quntry_symbol_list, timeframe=quntry_timeframe)
@@ -256,8 +238,8 @@ df_genel = apply_filters(df_genel_raw)
 # Özet Üst Metrikler
 c1, c2, c3 = st.columns(3)
 c1.metric(
-    "Aktif Borsa & Uptime",
-    f"🏛️ {selected_exchange_id.upper()}",
+    "Tarama Modu",
+    "Otomatik Havuz",
     f"Ping: {datetime.datetime.now().strftime('%H:%M:%S')}",
 )
 c2.metric("Quntry Fry Bulunan", len(df_quntry_raw))
@@ -268,7 +250,7 @@ st.markdown("### 🍟 Quntry Fry Özel Takip Listesi")
 if not df_quntry.empty:
     st.dataframe(df_quntry, use_container_width=True)
 else:
-    st.warning(f"⚠️ {selected_exchange_id.upper()} borsasında filtrelere uyan Quntry Fry coini bulunamadı.")
+    st.warning("⚠️ Belirlenen filtrelere uyan Quntry Fry coini bulunamadı.")
     if not df_quntry_raw.empty:
         with st.expander("🔍 Tüm Quntry Fry Varlıklarının Ham Verisini Göster"):
             st.dataframe(df_quntry_raw, use_container_width=True)
@@ -280,7 +262,7 @@ st.markdown("### 🎯 Genel Piyasa Risk & Hedef Analizi")
 if not df_genel.empty:
     st.dataframe(df_genel, use_container_width=True)
 else:
-    st.warning(f"⚠️ {selected_exchange_id.upper()} borsasında filtrelere uyan coin bulunamadı.")
+    st.warning("⚠️ Belirlenen filtrelere uyan Genel piyasa coini bulunamadı.")
     if not df_genel_raw.empty:
         with st.expander("🔍 Taranan Tüm Genel Varlıkların Ham Verisini Göster"):
             st.dataframe(df_genel_raw, use_container_width=True)
@@ -289,12 +271,12 @@ else:
 st.sidebar.markdown("---")
 if st.sidebar.button("📤 Telegram Raporunu Şimdi Gönder"):
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"📊 *ANLIK KRİPTO RAPORU ({selected_exchange_id.upper()})*\n⏱️ *Update Time:* `{now_str}`\n\n"
+    msg = f"📊 *ANLIK KRİPTO OTOMATİK BORSALAR RAPORU*\n⏱️ *Update Time:* `{now_str}`\n\n"
 
     if not df_quntry_raw.empty:
         msg += "🍟 *QUNTRY FRY BİLDİRİMLERİ:*\n"
         for _, row in df_quntry_raw.iterrows():
-            msg += f"• *{row['Sembol']}*: `${row['Fiyat ($)']}` | RSI: `{row['RSI (14)']}` | Sinyal: `{row['Sinyal']}`\n"
+            msg += f"• *{row['Sembol']}* ({row['Kaynak Borsa']}): `${row['Fiyat ($)']}` | RSI: `{row['RSI (14)']}` | Sinyal: `{row['Sinyal']}`\n"
 
     success, err = send_telegram_message(msg)
     if success:
@@ -314,12 +296,12 @@ if enable_auto_telegram:
 
     if (CURRENT_TIME - st.session_state["last_bot_run"]) > THIRTY_MINUTES:
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        msg = f"🤖 *OTOMATİK RAPOR ({selected_exchange_id.upper()})*\n⏱️ *Update Time:* `{now_str}`\n\n"
+        msg = f"🤖 *OTOMATİK PERİYODİK BORSALAR RAPORU*\n⏱️ *Update Time:* `{now_str}`\n\n"
 
         if not df_quntry_raw.empty:
             msg += "🍟 *QUNTRY FRY LİSTESİ:*\n"
             for _, row in df_quntry_raw.iterrows():
-                msg += f"• *{row['Sembol']}*: `${row['Fiyat ($)']}` | Durum: `{row['Sinyal']}`\n"
+                msg += f"• *{row['Sembol']}* ({row['Kaynak Borsa']}): `${row['Fiyat ($)']}` | Durum: `{row['Sinyal']}`\n"
 
         send_telegram_message(msg)
         st.session_state["last_bot_run"] = CURRENT_TIME
